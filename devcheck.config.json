@@ -1,0 +1,17 @@
+{
+  "depcheck": {
+    "ignores": [
+      "@types/*",
+      "pino-pretty",
+      "typescript",
+      "tsc-alias",
+      "depcheck",
+      "@cyanheads/mcp-ts-core",
+      "@duckdb/node-api"
+    ],
+    "ignorePatterns": []
+  },
+  "outdated": {
+    "allowlist": []
+  }
+}

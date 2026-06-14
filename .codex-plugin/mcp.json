@@ -1,0 +1,10 @@
+{
+  "openaq-mcp-server": {
+    "command": "npx",
+    "args": ["-y", "@cyanheads/openaq-mcp-server"],
+    "env": {
+      "MCP_TRANSPORT_TYPE": "stdio",
+      "OPENAQ_API_KEY": "${OPENAQ_API_KEY}"
+    }
+  }
+}

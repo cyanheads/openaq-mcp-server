@@ -1,0 +1,50 @@
+{
+  "manifest_version": "0.3",
+  "name": "openaq-mcp-server",
+  "version": "0.1.0",
+  "description": "Find air-quality monitoring stations and read measured pollutant observations (PM2.5, PM10, O3, NO2, SO2, CO, and more) from government monitors worldwide via the OpenAQ v3 API, with DataCanvas SQL over historical series.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/openaq-mcp-server",
+  "repository": { "type": "git", "url": "https://github.com/cyanheads/openaq-mcp-server" },
+  "license": "Apache-2.0",
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "MCP_TRANSPORT_TYPE": "stdio",
+        "MCP_AUTH_MODE": "none",
+        "NODE_ENV": "production",
+        "OPENAQ_API_KEY": "${user_config.OPENAQ_API_KEY}",
+        "CANVAS_PROVIDER_TYPE": "${user_config.CANVAS_PROVIDER_TYPE}"
+      }
+    }
+  },
+  "compatibility": {
+    "runtimes": { "node": ">=24.0.0" }
+  },
+  "tools_generated": true,
+  "prompts_generated": true,
+  "user_config": {
+    "OPENAQ_API_KEY": {
+      "type": "string",
+      "title": "OpenAQ API key",
+      "description": "OpenAQ v3 API key, sent as the X-API-Key header. Free from openaq.org.",
+      "sensitive": true,
+      "required": true
+    },
+    "CANVAS_PROVIDER_TYPE": {
+      "type": "string",
+      "title": "DataCanvas provider",
+      "description": "Set to 'duckdb' to enable SQL analysis over large measurement series. Leave as 'none' to disable.",
+      "required": false,
+      "default": "none"
+    }
+  }
+}

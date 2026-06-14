@@ -1,0 +1,33 @@
+{
+  "name": "@cyanheads/openaq-mcp-server",
+  "version": "0.1.0",
+  "description": "Find air-quality monitoring stations and read measured pollutant observations (PM2.5, PM10, O3, NO2, SO2, CO, and more) from government monitors worldwide via the OpenAQ v3 API, with DataCanvas SQL over historical series.",
+  "author": {
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
+  },
+  "homepage": "https://github.com/cyanheads/openaq-mcp-server",
+  "repository": "https://github.com/cyanheads/openaq-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "openaq",
+    "air-quality"
+  ],
+  "mcpServers": "./.codex-plugin/mcp.json",
+  "interface": {
+    "displayName": "openaq-mcp-server",
+    "shortDescription": "Measured air quality from OpenAQ v3 — sensor observations worldwide.",
+    "longDescription": "Wraps the OpenAQ v3 API to expose measured air quality: find monitoring stations near a point / in a bounding box / by country, read the latest values per sensor (joined with pollutant + unit), and pull historical measurement series with raw/hourly/daily aggregation. Large series spill to a DataCanvas for SQL analysis. Units are surfaced verbatim and never converted.",
+    "developerName": "cyanheads",
+    "category": "data",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/cyanheads/openaq-mcp-server",
+    "defaultPrompt": []
+  }
+}
