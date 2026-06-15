@@ -1,5 +1,5 @@
 {
-  "name": "@cyanheads/openaq-mcp-server",
+  "name": "openaq-mcp-server",
   "version": "0.1.1",
   "description": "Find air-quality monitoring stations and read measured pollutant observations (PM2.5, PM10, O3, NO2, SO2, CO, and more) from government monitors worldwide via the OpenAQ v3 API, with DataCanvas SQL over historical series.",
   "author": {
