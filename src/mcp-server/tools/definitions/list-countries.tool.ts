@@ -106,7 +106,7 @@ export const listCountries = tool('openaq_list_countries', {
         name: c.name,
         datetimeFirst: c.datetimeFirst,
         datetimeLast: c.datetimeLast,
-        parameters: c.parameters.map((p) => ({ id: p.id, name: p.name, unit: p.units })),
+        parameters: (c.parameters ?? []).map((p) => ({ id: p.id, name: p.name, unit: p.units })),
       })),
     };
   },

@@ -146,7 +146,8 @@ export interface OpenAqCountry {
   datetimeLast: string | null;
   id: number;
   name: string;
-  parameters: OpenAqParameterRef[];
+  /** Null when the API omits the field for a country with no measured parameters. */
+  parameters: OpenAqParameterRef[] | null;
 }
 
 /** Aggregation mode for the measurements endpoints. */

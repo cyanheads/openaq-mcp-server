@@ -9,7 +9,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { afterEach, describe, expect, it } from 'vitest';
 import { listCountries } from '@/mcp-server/tools/definitions/list-countries.tool.js';
 import { setOpenAqService } from '@/services/openaq/openaq-service.js';
-import { countries } from '../fixtures/openaq.js';
+import { countries, countriesWithNullParameters } from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
 
 afterEach(() => setOpenAqService(undefined as never));
@@ -44,6 +44,34 @@ describe('openaq_list_countries', () => {
     );
     expect(result.countries).toHaveLength(0);
     expect(getEnrichment(ctx).notice).toContain('atlantis');
+  });
+
+  it('returns a country with null parameters as empty array (regression #1)', async () => {
+    installStubService({ listCountries: async () => countriesWithNullParameters });
+    const ctx = createMockContext();
+    const result = await listCountries.handler(listCountries.input.parse({}), ctx);
+    const sparse = result.countries.find((c) => c.code === 'XX');
+    expect(sparse).toBeDefined();
+    expect(sparse?.parameters).toEqual([]);
+    expect(getEnrichment(ctx).totalCount).toBe(3);
+  });
+
+  it('format renders "none listed" for a country with no parameters (regression #1)', () => {
+    const blocks = listCountries.format!({
+      countries: [
+        {
+          id: 999,
+          code: 'XX',
+          name: 'Sparse Country',
+          datetimeFirst: null,
+          datetimeLast: null,
+          parameters: [],
+        },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('XX');
+    expect(text).toContain('none listed');
   });
 
   it('format renders code, id, span, and parameter ids/units', () => {

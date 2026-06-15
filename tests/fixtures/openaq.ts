@@ -171,3 +171,16 @@ export const countries: OpenAqCountry[] = [
     parameters: [{ id: 2, name: 'pm25', units: 'µg/m³', displayName: 'PM2.5' }],
   },
 ];
+
+/** A country whose `parameters` field is null — the bug case for #1. */
+export const countriesWithNullParameters: OpenAqCountry[] = [
+  ...countries,
+  {
+    id: 999,
+    code: 'XX',
+    name: 'Sparse Country',
+    datetimeFirst: null,
+    datetimeLast: null,
+    parameters: null,
+  },
+];
