@@ -19,6 +19,12 @@
 
 </div>
 
+<div align="center">
+
+**Public Hosted Server:** [https://openaq.caseyjhand.com/mcp](https://openaq.caseyjhand.com/mcp)
+
+</div>
+
 ---
 
 `openaq-mcp-server` wraps the [OpenAQ v3 API](https://docs.openaq.org/) to expose **measured** air quality — physical-sensor observations from government reference monitors and research-grade sensors worldwide. It is the ground-truth counterpart to a modeled air-quality grid: where a model gives a concentration anywhere, OpenAQ gives an actual reading from a physical monitor — sparser, unevenly distributed, but real.
@@ -126,6 +132,23 @@ Agent-friendly output:
 - Capped lists disclose truncation (`totalCount`, `truncated`) via framework enrichment, reaching both the structured and text output surfaces
 
 ## Getting started
+
+### Public Hosted Instance
+
+A public instance is available at `https://openaq.caseyjhand.com/mcp` — no installation required. Point any MCP client at it via Streamable HTTP, with this client config:
+
+```json
+{
+  "mcpServers": {
+    "openaq-mcp-server": {
+      "type": "streamable-http",
+      "url": "https://openaq.caseyjhand.com/mcp"
+    }
+  }
+}
+```
+
+### Self-hosted
 
 An OpenAQ v3 API key is required — sent as the `X-API-Key` header on every request. Get a free key from your [OpenAQ Explorer](https://explore.openaq.org/) account.
 
