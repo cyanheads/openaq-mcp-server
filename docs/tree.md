@@ -1,6 +1,6 @@
 # openaq-mcp-server - Directory Structure
 
-Generated on: 2026-06-14 01:54:14
+Generated on: 2026-06-20 17:28:55
 
 ```text
 openaq-mcp-server/
@@ -26,6 +26,7 @@ openaq-mcp-server/
 ├── scripts/
 │   ├── build-changelog.ts
 │   ├── build.ts
+│   ├── check-dependency-specifiers.ts
 │   ├── check-docs-sync.ts
 │   ├── check-framework-antipatterns.ts
 │   ├── check-skill-versions.ts
