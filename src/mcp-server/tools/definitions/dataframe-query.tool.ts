@@ -13,7 +13,7 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 export const dataframeQuery = tool('openaq_dataframe_query', {
   title: 'openaq-mcp-server: dataframe query',
   description:
-    'Run a read-only SQL SELECT against the measurement tables openaq_get_measurements staged on a DataCanvas. Reference tables by the name the measurements call returned (measurements_<sensorId>). For aggregation (monthly means, exceedance counts) and cross-sensor comparison over series too large to inline. Only SELECT is allowed — a four-layer gate rejects writes, DDL, and file/network table functions.',
+    'Run a read-only SQL SELECT against the measurement tables openaq_get_measurements staged on a DataCanvas. Reference tables by the name the measurements call returned (measurements_<sensorId>). For aggregation (monthly means, exceedance counts) and cross-sensor comparison over series too large to inline. Only SELECT is allowed — writes, DDL, and file/network table functions are rejected.',
   annotations: { readOnlyHint: true },
   input: z.object({
     canvas_id: z

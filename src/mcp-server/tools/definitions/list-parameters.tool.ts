@@ -44,7 +44,7 @@ export const listParameters = tool('openaq_list_parameters', {
       .string()
       .optional()
       .describe(
-        'Local case-insensitive filter on code, display name, and description (e.g. "pm" for particulates, "ozone", "co"). The full catalog is small (~44 entries); omit to list everything. This filters the fetched list on our side — it is not an upstream search.',
+        'Case-insensitive filter over the bounded parameter catalog (~44) by code, display name, and description (e.g. "pm" for particulates, "ozone", "co"). Omit to list everything.',
       ),
     pollutantsOnly: z
       .boolean()

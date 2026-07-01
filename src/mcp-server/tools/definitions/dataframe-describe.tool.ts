@@ -12,7 +12,7 @@ import { getCanvas } from '@/services/canvas-accessor.js';
 export const dataframeDescribe = tool('openaq_dataframe_describe', {
   title: 'openaq-mcp-server: dataframe describe',
   description:
-    'List the tables and columns staged on a DataCanvas so you can write valid SQL for openaq_dataframe_query without guessing column names. Returns each measurement table (measurements_<sensorId>) with its row count and column names. Throws canvas_unavailable when DuckDB is off.',
+    'List the tables and columns staged on a DataCanvas so you can write valid SQL for openaq_dataframe_query without guessing column names. Returns each measurement table (measurements_<sensorId>) with its row count and column names. Requires DataCanvas to be enabled.',
   annotations: { readOnlyHint: true },
   input: z.object({
     canvas_id: z

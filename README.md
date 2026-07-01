@@ -72,7 +72,7 @@ Latest value per sensor at a station — the current-conditions tool.
 
 Historical measurement series for one pollutant at one station over a date range — for trend analysis and "was last week worse than the monthly average?".
 
-- Pass a `locationId` and a `parametersId`; the tool resolves the station's sensor for that parameter internally (v3 series are sensor-scoped, but you think in stations)
+- Pass a `locationId` and a `parametersId` and work in stations — the server maps station + parameter to the underlying sensor (v3 series are sensor-scoped), so you get the series for that pollutant at that station
 - `aggregation`: `raw` (every reported value), `hourly`, or `daily` — `hourly`/`daily` add a per-bucket statistical summary (min, median, max, mean, sd)
 - `datetimeFrom`/`datetimeTo` accept a date (`YYYY-MM-DD`) or full UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`); omit for the most recent values
 - Values carry their unit; the server **never converts** between µg/m³, ppm, and ppb (the conversion is gas- and temperature-dependent)
@@ -96,7 +96,7 @@ Pass a prior `canvas_id` back into `openaq_get_measurements` to stage a **second
 
 **Requires `CANVAS_PROVIDER_TYPE=duckdb`.** Without it, `openaq_get_measurements` still returns the truncated preview plus a notice (it does not fail), and the two dataframe tools return a `canvas_unavailable` error directing you to enable DuckDB.
 
-`openaq_dataframe_query` is read-only by design — a four-layer SQL gate rejects writes, DDL, and file/network table functions; only a single `SELECT` runs.
+`openaq_dataframe_query` is read-only by design — writes, DDL, and file/network table functions are rejected; only a single `SELECT` runs.
 
 ## Resources and prompts
 

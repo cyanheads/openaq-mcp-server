@@ -455,8 +455,8 @@ errors: [
 
 **Description:** Historical measurement series for one pollutant at one station over a date range —
 for trend analysis and "was last week worse than the monthly average?". Pass a `locationId` and a
-`parametersId`; the tool resolves the station's sensor for that parameter internally (v3 series are
-sensor-scoped, but you think in stations). Choose `aggregation`: `raw` (every reported value),
+`parametersId` and work in stations — you get the series for that pollutant at that station. Choose
+`aggregation`: `raw` (every reported value),
 `hourly`, or `daily` — `daily` and `hourly` add a per-bucket statistical summary (min, median,
 max, mean, sd). Large ranges produce thousands of rows and spill to a DataCanvas: the response
 returns a preview plus a `canvasId` and table name you query with `openaq_dataframe_query`. Values
@@ -564,7 +564,7 @@ reading's unit. A small bounded catalog fetched live from OpenAQ.
 ```ts
 {
   query: z.string().optional()
-    .describe('Local case-insensitive filter on code, display name, and description (e.g. "pm" for particulates, "ozone", "co"). The full catalog is small (~44 entries); omit to list everything. This filters the fetched list on our side — it is not an upstream search.'),
+    .describe('Case-insensitive filter over the bounded parameter catalog (~44) by code, display name, and description (e.g. "pm" for particulates, "ozone", "co"). Omit to list everything.'),
   pollutantsOnly: z.boolean().default(false)
     .describe('When true, exclude meteorological/auxiliary parameters (temperature, humidity, wind, pressure, particle-count channels) and return only air pollutants. Default false (full catalog).'),
 }
@@ -610,7 +610,7 @@ monitoring?" and tells you whether a country has recent data before you call
 ```ts
 {
   query: z.string().optional()
-    .describe('Local case-insensitive filter on country code and name (e.g. "united", "IN", "germany"). The list is bounded (~153 countries); omit to list all. Filters the fetched list on our side, not an upstream search.'),
+    .describe('Case-insensitive filter over the bounded country catalog (~153) by code and name. A two-letter query is treated as an exact ISO 3166-1 alpha-2 code (e.g. "US" → United States); longer queries match as substrings (e.g. "united", "germany"). Omit to list all.'),
 }
 ```
 
