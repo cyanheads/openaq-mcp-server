@@ -20,7 +20,7 @@ export const listCountries = tool('openaq_list_countries', {
       .string()
       .optional()
       .describe(
-        'Local case-insensitive filter on country code and name (e.g. "united", "IN", "germany"). The list is bounded (~153 countries); omit to list all. Filters the fetched list on our side, not an upstream search.',
+        'Case-insensitive filter over the bounded country catalog (~153) by code and name. A two-letter query is treated as an exact ISO 3166-1 alpha-2 code (e.g. "US" → United States); longer queries match as substrings (e.g. "united", "germany"). Omit to list all.',
       ),
   }),
   output: z.object({
@@ -83,9 +83,13 @@ export const listCountries = tool('openaq_list_countries', {
 
     if (input.query) {
       const q = input.query.toLowerCase();
-      filtered = all.filter(
-        (c) => c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q),
-      );
+      // A two-letter query is an ISO 3166-1 alpha-2 lookup first: an exact code match
+      // wins outright (so "US" → United States, not every name containing "us").
+      // Fall back to substring when there's no exact code match, or for longer queries.
+      const exactCode = q.length === 2 ? all.find((c) => c.code.toLowerCase() === q) : undefined;
+      filtered = exactCode
+        ? [exactCode]
+        : all.filter((c) => c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q));
     }
 
     ctx.enrich.total(filtered.length);

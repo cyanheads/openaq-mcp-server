@@ -9,7 +9,11 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { afterEach, describe, expect, it } from 'vitest';
 import { listCountries } from '@/mcp-server/tools/definitions/list-countries.tool.js';
 import { setOpenAqService } from '@/services/openaq/openaq-service.js';
-import { countries, countriesWithNullParameters } from '../fixtures/openaq.js';
+import {
+  countries,
+  countriesWithNullParameters,
+  usSubstringCountries,
+} from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
 
 afterEach(() => setOpenAqService(undefined as never));
@@ -33,6 +37,31 @@ describe('openaq_list_countries', () => {
     const result = await listCountries.handler(listCountries.input.parse({ query: 'india' }), ctx);
     expect(result.countries).toHaveLength(1);
     expect(result.countries[0]?.code).toBe('IN');
+  });
+
+  it('returns the exact ISO code match alone for a two-letter query (#4)', async () => {
+    installStubService({ listCountries: async () => usSubstringCountries });
+    const ctx = createMockContext();
+    const result = await listCountries.handler(listCountries.input.parse({ query: 'US' }), ctx);
+    expect(result.countries).toHaveLength(1);
+    expect(result.countries[0]?.code).toBe('US');
+    expect(result.countries[0]?.name).toBe('United States');
+  });
+
+  it('treats a lowercase two-letter query as an ISO code, not a substring (#4)', async () => {
+    installStubService({ listCountries: async () => usSubstringCountries });
+    const ctx = createMockContext();
+    const result = await listCountries.handler(listCountries.input.parse({ query: 'us' }), ctx);
+    // "us" is a substring of Cyprus/Australia, but the exact US code wins outright.
+    expect(result.countries).toHaveLength(1);
+    expect(result.countries[0]?.code).toBe('US');
+  });
+
+  it('keeps a longer name fragment fuzzy across multiple matches (#4)', async () => {
+    installStubService({ listCountries: async () => usSubstringCountries });
+    const ctx = createMockContext();
+    const result = await listCountries.handler(listCountries.input.parse({ query: 'united' }), ctx);
+    expect(result.countries.map((c) => c.code).sort()).toEqual(['GB', 'US']);
   });
 
   it('emits a notice when the filter matches nothing', async () => {
