@@ -14,6 +14,16 @@ import { datetimePair, isNotFound } from '@/mcp-server/tools/shared/schema-helpe
 import { getOpenAqService } from '@/services/openaq/openaq-service.js';
 import type { OpenAqLocation } from '@/services/openaq/types.js';
 
+/**
+ * Candidate pool pulled when auto-resolving the nearest station from coordinates.
+ * OpenAQ /v3/locations is not distance-sorted, so `limit: 1` can return a far
+ * station; we fetch a pool and let the service's distance sort surface the true
+ * nearest at results[0]. Capped at 100 (the find_locations page cap) rather than the
+ * API max — a single coordinate+radius query rarely yields more matching stations,
+ * so the nearest is effectively always in the pool.
+ */
+const NEAREST_CANDIDATE_LIMIT = 100;
+
 export const getReadings = tool('openaq_get_readings', {
   title: 'openaq-mcp-server: get readings',
   description:
@@ -164,12 +174,14 @@ export const getReadings = tool('openaq_get_readings', {
     let distanceMeters: number | null = null;
 
     if (hasCoordinates) {
+      // Pull a candidate pool (not limit:1) so the service's distance sort can pick
+      // the true nearest — upstream order alone can surface a farther station first.
       const found = await service.findLocations(
         {
           coordinates: input.coordinates as string,
           radius: 25000,
           parametersId: input.parametersId as number,
-          limit: 1,
+          limit: NEAREST_CANDIDATE_LIMIT,
         },
         ctx,
       );

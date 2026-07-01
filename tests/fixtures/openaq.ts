@@ -172,6 +172,50 @@ export const countries: OpenAqCountry[] = [
   },
 ];
 
+/**
+ * Three coordinate-query locations returned OUT of distance order — the #2 repro
+ * (Bremerton 917 at ~22km arrives before the ~1.4km Seattle station). The service
+ * must sort these ascending so results[0] is the true nearest (id 931).
+ */
+export const unsortedByDistance: OpenAqLocation[] = [
+  { ...seattleLocation, id: 917, name: 'Bremerton-Spruce Ave', distance: 22257.53 },
+  { ...seattleLocation, id: 931, name: 'Seattle-10th & Weller', distance: 1364.84 },
+  { ...seattleLocation, id: 700, name: 'Seattle-Beacon Hill', distance: 4575.1 },
+];
+
+/**
+ * Countries whose names or codes contain the "us" substring — the #4 repro. A
+ * two-letter "US" query must return United States alone (exact ISO code), not every
+ * country matching the substring (Cyprus, Australia, United Kingdom by name).
+ */
+export const usSubstringCountries: OpenAqCountry[] = [
+  {
+    id: 155,
+    code: 'US',
+    name: 'United States',
+    datetimeFirst: null,
+    datetimeLast: null,
+    parameters: [],
+  },
+  {
+    id: 826,
+    code: 'GB',
+    name: 'United Kingdom',
+    datetimeFirst: null,
+    datetimeLast: null,
+    parameters: [],
+  },
+  { id: 196, code: 'CY', name: 'Cyprus', datetimeFirst: null, datetimeLast: null, parameters: [] },
+  {
+    id: 36,
+    code: 'AU',
+    name: 'Australia',
+    datetimeFirst: null,
+    datetimeLast: null,
+    parameters: [],
+  },
+];
+
 /** A country whose `parameters` field is null — the bug case for #1. */
 export const countriesWithNullParameters: OpenAqCountry[] = [
   ...countries,

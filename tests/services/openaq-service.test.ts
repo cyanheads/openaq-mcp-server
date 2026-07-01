@@ -12,10 +12,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetServerConfig } from '@/config/server-config.js';
 import {
   extractValidationMessage,
+  interpretFound,
   OpenAqService,
   parseFound,
 } from '@/services/openaq/openaq-service.js';
-import { parameters, seattleLocation } from '../fixtures/openaq.js';
+import {
+  parameters,
+  seattleLocation,
+  sparseLocation,
+  unsortedByDistance,
+} from '../fixtures/openaq.js';
 
 const okJson = (body: unknown): Response =>
   new Response(JSON.stringify(body), {
@@ -43,6 +49,21 @@ describe('parseFound', () => {
   });
   it('treats undefined as 0', () => {
     expect(parseFound(undefined)).toBe(0);
+  });
+});
+
+describe('interpretFound', () => {
+  it('treats a bare number as an exact total', () => {
+    expect(interpretFound(150)).toEqual({ total: 150, isLowerBound: false });
+  });
+  it('treats ">N" as a lower bound with N as the floor', () => {
+    expect(interpretFound('>5')).toEqual({ total: 5, isLowerBound: true });
+  });
+  it('parses a plain numeric string as exact', () => {
+    expect(interpretFound('42')).toEqual({ total: 42, isLowerBound: false });
+  });
+  it('treats undefined as an exact zero', () => {
+    expect(interpretFound(undefined)).toEqual({ total: 0, isLowerBound: false });
   });
 });
 
@@ -191,5 +212,44 @@ describe('OpenAqService error classification', () => {
     const loc = await svc.getLocation(931, createMockContext());
     expect(loc.id).toBe(931);
     expect(loc.sensors).toHaveLength(2);
+  });
+});
+
+describe('OpenAqService.findLocations distance sort (#2)', () => {
+  beforeEach(() => {
+    vi.stubEnv('OPENAQ_API_KEY', 'test-key');
+    vi.stubEnv('OPENAQ_API_BASE_URL', 'https://api.openaq.org/v3');
+    resetServerConfig();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    resetServerConfig();
+  });
+
+  it('sorts coordinate results ascending by distance so results[0] is the nearest', async () => {
+    // Upstream returns Bremerton (22km) before the 1.4km Seattle station — the repro.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(okJson({ results: unsortedByDistance }));
+    const svc = makeService();
+    const res = await svc.findLocations(
+      { coordinates: '47.6062,-122.3321', radius: 12000, parametersId: 2, limit: 5 },
+      createMockContext(),
+    );
+    expect(res.results.map((r) => r.distance)).toEqual([1364.84, 4575.1, 22257.53]);
+    expect(res.results[0]?.id).toBe(931); // Seattle, not Bremerton (917)
+  });
+
+  it('leaves bbox results (distance null) in upstream order', async () => {
+    const bboxResults = [
+      { ...sparseLocation, id: 1 },
+      { ...sparseLocation, id: 2 },
+    ];
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(okJson({ results: bboxResults }));
+    const svc = makeService();
+    const res = await svc.findLocations(
+      { bbox: '77.0,28.4,77.4,28.8', limit: 5 },
+      createMockContext(),
+    );
+    expect(res.results.map((r) => r.id)).toEqual([1, 2]);
   });
 });

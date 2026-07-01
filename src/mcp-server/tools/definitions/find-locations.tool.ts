@@ -10,7 +10,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { bboxSchema, coordinatesSchema } from '@/mcp-server/tools/shared/geo-input.js';
 import { datetimePair } from '@/mcp-server/tools/shared/schema-helpers.js';
-import { getOpenAqService } from '@/services/openaq/openaq-service.js';
+import { getOpenAqService, interpretFound } from '@/services/openaq/openaq-service.js';
 import type { OpenAqLocation } from '@/services/openaq/types.js';
 
 /** Reshape a raw location into the tool's domain output, sensors[] → parameters[]. */
@@ -162,13 +162,29 @@ export const findLocations = tool('openaq_find_locations', {
       ),
   }),
   enrichment: {
-    totalCount: z.number().describe('Total matching stations before the limit.'),
+    totalCount: z
+      .number()
+      .describe(
+        'Total matching stations before the limit. A floor (not an exact count) when totalCountIsLowerBound is true.',
+      ),
+    totalCountIsLowerBound: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when OpenAQ reported a lower bound (">N"): totalCount is a floor and more stations match than the count shown.',
+      ),
     truncated: z
       .boolean()
       .optional()
       .describe('True when the station list was capped at the limit.'),
     shown: z.number().optional().describe('Number of stations returned.'),
     cap: z.number().optional().describe('The limit that was applied.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when OpenAQ reports a lower-bound total without the result set hitting the limit.',
+      ),
   },
   errors: [
     {
@@ -223,23 +239,27 @@ export const findLocations = tool('openaq_find_locations', {
       });
     }
 
-    // `meta.found` is the upstream total before the limit; fall back to shown count.
-    const found = res.meta?.found;
-    const total =
-      typeof found === 'number'
-        ? found
-        : typeof found === 'string'
-          ? Number(found.replace(/[^\d]/g, '')) || locations.length
-          : locations.length;
+    // `meta.found` is the upstream total before the limit — but OpenAQ reports ">N"
+    // (a lower bound) once the count exceeds the page cap. Keep totalCount as the
+    // numeric floor and flag it, so the count is never presented as exact.
+    const { total: foundFloor, isLowerBound } = interpretFound(res.meta?.found);
+    const total = foundFloor > 0 ? foundFloor : locations.length;
     ctx.enrich.total(total);
+    if (isLowerBound) ctx.enrich({ totalCountIsLowerBound: true });
 
     if (locations.length >= input.limit) {
       ctx.enrich.truncated({
         shown: locations.length,
         cap: input.limit,
-        guidance:
-          'More stations may match. Narrow with parametersId, a smaller radius, or a tighter bbox, or raise limit (max 100).',
+        guidance: isLowerBound
+          ? `OpenAQ reports more than ${total} matching stations (a lower bound, not an exact count); showing ${locations.length}. Narrow with parametersId, a smaller radius, or a tighter bbox, or raise limit (max 100).`
+          : 'More stations may match. Narrow with parametersId, a smaller radius, or a tighter bbox, or raise limit (max 100).',
       });
+    } else if (isLowerBound) {
+      // Lower bound without hitting the cap (rare) — still disclose it as a notice.
+      ctx.enrich.notice(
+        `OpenAQ reports more than ${total} matching stations (a lower bound, not an exact count).`,
+      );
     }
 
     ctx.log.info('Found locations', {

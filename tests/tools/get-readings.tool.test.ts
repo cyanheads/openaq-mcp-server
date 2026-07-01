@@ -52,10 +52,33 @@ describe('openaq_get_readings', () => {
       getReadings.input.parse({ coordinates: '47.6,-122.3', parametersId: 2 }),
       ctx,
     );
-    // Nearest-station resolution uses radius 25000 + the parameter filter + limit 1.
-    expect(findArgs).toMatchObject({ radius: 25000, parametersId: 2, limit: 1 });
+    // Nearest resolution pulls a candidate pool (not limit:1) so the distance sort
+    // can surface the true nearest; radius 25000 + the parameter filter still apply.
+    expect(findArgs).toMatchObject({ radius: 25000, parametersId: 2, limit: 100 });
     expect(result.location.distanceMeters).toBe(1364.84);
     expect(result.readings.length).toBeGreaterThan(0);
+  });
+
+  it('picks results[0] (the service-sorted nearest) from a candidate pool (#2)', async () => {
+    installStubService({
+      // The service returns coordinate results distance-sorted; get_readings must
+      // trust results[0] as nearest rather than a farther candidate in the pool.
+      findLocations: async () => ({
+        meta: { found: 2 },
+        results: [
+          { ...seattleLocation, id: 931, distance: 1364.84 },
+          { ...seattleLocation, id: 917, name: 'Bremerton-Spruce Ave', distance: 22257.53 },
+        ],
+      }),
+      getLocation: async () => seattleLocation,
+      getLatest: async () => seattleLatest,
+    });
+    const result = await getReadings.handler(
+      getReadings.input.parse({ coordinates: '47.6,-122.3', parametersId: 2 }),
+      ctxWith(),
+    );
+    // 1364.84 (the near Seattle station), not 22257.53 (far Bremerton).
+    expect(result.location.distanceMeters).toBe(1364.84);
   });
 
   it('throws missing_coordinates_parameter when coordinates lacks parametersId', async () => {

@@ -93,6 +93,26 @@ describe('openaq_find_locations', () => {
     expect(enrich.truncated).toBe(true);
     expect(enrich.shown).toBe(2);
     expect(enrich.cap).toBe(2);
+    // #3: ">2" is a lower bound — totalCount is the floor, flagged as inexact.
+    expect(enrich.totalCount).toBe(2);
+    expect(enrich.totalCountIsLowerBound).toBe(true);
+  });
+
+  it('reports an exact numeric total without the lower-bound flag (#3)', async () => {
+    installStubService({
+      findLocations: async () => ({
+        meta: { found: 5 },
+        results: [seattleLocation, sparseLocation],
+      }),
+    });
+    const ctx = ctxWith();
+    await findLocations.handler(
+      findLocations.input.parse({ coordinates: '47.6,-122.3', limit: 20 }),
+      ctx,
+    );
+    const enrich = getEnrichment(ctx);
+    expect(enrich.totalCount).toBe(5);
+    expect(enrich.totalCountIsLowerBound).toBeUndefined();
   });
 
   it('handles a sparse bbox location (null distance/name/displayName) without inventing facts', async () => {

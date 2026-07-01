@@ -64,16 +64,30 @@ export interface MeasurementsPage {
 
 const FETCH_TIMEOUT_MS = 15_000;
 
-/** Extract a usable total from `meta.found`, which may be a string like `">2"`. */
-function parseFound(found: number | string | undefined): number {
-  if (typeof found === 'number') return found;
+/**
+ * Interpret `meta.found` (which may be a string like `">5"`) into a numeric floor
+ * plus whether it is a lower bound. `">N"` means strictly more than N exist, so the
+ * embedded number is a floor, not an exact total. A bare number is exact.
+ */
+function interpretFound(found: number | string | undefined): {
+  isLowerBound: boolean;
+  total: number;
+} {
+  if (typeof found === 'number') return { total: found, isLowerBound: false };
   if (typeof found === 'string') {
     const digits = found.replace(/[^\d]/g, '');
-    if (digits.length === 0) return Number.POSITIVE_INFINITY;
-    // ">N" means strictly more than N exist — treat as a lower bound's ceiling.
-    return found.includes('>') ? Number.POSITIVE_INFINITY : Number(digits);
+    return { total: digits.length > 0 ? Number(digits) : 0, isLowerBound: found.includes('>') };
   }
-  return 0;
+  return { total: 0, isLowerBound: false };
+}
+
+/**
+ * `meta.found` → a usable number for the measurement pager. A `">N"` lower bound is
+ * an unbounded ceiling (`Infinity`) — the row cap, not this value, bounds the pull.
+ */
+function parseFound(found: number | string | undefined): number {
+  const { total, isLowerBound } = interpretFound(found);
+  return isLowerBound ? Number.POSITIVE_INFINITY : total;
 }
 
 /** Pull the first `'msg'` value out of OpenAQ's Python-repr 422 body. */
@@ -167,7 +181,7 @@ export class OpenAqService {
   }
 
   /** `GET /v3/locations` — coordinates+radius / bbox / iso / parametersId. */
-  findLocations(
+  async findLocations(
     params: FindLocationsParams,
     ctx: Context,
   ): Promise<OpenAqListResponse<OpenAqLocation>> {
@@ -181,7 +195,22 @@ export class OpenAqService {
     if (params.parametersId !== undefined) qs.set('parameters_id', String(params.parametersId));
     qs.set('limit', String(params.limit));
     if (params.page !== undefined) qs.set('page', String(params.page));
-    return this.get(`/locations?${qs.toString()}`, 'openaq.findLocations', ctx);
+    const res = await this.get<OpenAqListResponse<OpenAqLocation>>(
+      `/locations?${qs.toString()}`,
+      'openaq.findLocations',
+      ctx,
+    );
+    // OpenAQ /v3/locations is NOT distance-sorted. When searching by coordinates,
+    // order results ascending by distance so results[0] is the true nearest — both
+    // find_locations output and get_readings auto-resolution depend on this. bbox/iso
+    // results carry distance: null (no center point), so leave their order untouched.
+    if (params.coordinates) {
+      res.results.sort(
+        (a, b) =>
+          (a.distance ?? Number.POSITIVE_INFINITY) - (b.distance ?? Number.POSITIVE_INFINITY),
+      );
+    }
+    return res;
   }
 
   /** `GET /v3/locations/{id}` — the canonical sensor→parameter→unit map. */
@@ -270,4 +299,4 @@ export function setOpenAqService(service: OpenAqService): void {
   _service = service;
 }
 
-export { extractValidationMessage, parseFound };
+export { extractValidationMessage, interpretFound, parseFound };
