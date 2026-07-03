@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: openaq-mcp-server
+abstract: "Find air-quality monitoring stations and read measured pollutant observations (PM2.5, PM10, O3, NO2, SO2, CO, and more) from government monitors worldwide via the OpenAQ v3 API, with DataCanvas SQL over historical series."
+type: software
+authors:
+  - family-names: Hand
+    given-names: Casey
+    orcid: "https://orcid.org/0009-0009-3726-568X"
+repository-code: "https://github.com/cyanheads/openaq-mcp-server"
+license: Apache-2.0
+keywords:
+  - mcp
+  - model-context-protocol
+  - openaq
+  - air-quality
+  - pm25
+  - pollution
