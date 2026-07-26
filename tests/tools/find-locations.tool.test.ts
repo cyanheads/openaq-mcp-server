@@ -9,6 +9,7 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { findLocations } from '@/mcp-server/tools/definitions/find-locations.tool.js';
+import type { FindLocationsParams } from '@/services/openaq/openaq-service.js';
 import { setOpenAqService } from '@/services/openaq/openaq-service.js';
 import { seattleLocation, sparseLocation } from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
@@ -113,6 +114,47 @@ describe('openaq_find_locations', () => {
     const enrich = getEnrichment(ctx);
     expect(enrich.totalCount).toBe(5);
     expect(enrich.totalCountIsLowerBound).toBeUndefined();
+  });
+
+  it('forwards page to the service and defaults it to 1 (#14)', async () => {
+    const seen: FindLocationsParams[] = [];
+    installStubService({
+      findLocations: async (params) => {
+        seen.push(params);
+        return { meta: { found: 1 }, results: [seattleLocation] };
+      },
+    });
+    await findLocations.handler(findLocations.input.parse({ iso: 'US' }), ctxWith());
+    await findLocations.handler(findLocations.input.parse({ iso: 'US', page: 3 }), ctxWith());
+    expect(seen.map((p) => p.page)).toEqual([1, 3]);
+  });
+
+  it('names the next page (not "raise limit") once limit is at the 100 cap (#14)', async () => {
+    installStubService({
+      findLocations: async () => ({
+        meta: { found: '>100' },
+        results: Array.from({ length: 100 }, (_, i) => ({ ...seattleLocation, id: 1000 + i })),
+      }),
+    });
+    const ctx = ctxWith();
+    await findLocations.handler(findLocations.input.parse({ iso: 'US', limit: 100 }), ctx);
+    const guidance = getEnrichment(ctx).notice as string;
+    expect(guidance).toContain('request page 2');
+    expect(guidance).not.toContain('raise limit');
+  });
+
+  it('still says "raise limit" below the cap, where limit has somewhere to go (#14)', async () => {
+    installStubService({
+      findLocations: async () => ({
+        meta: { found: '>2' },
+        results: [seattleLocation, sparseLocation],
+      }),
+    });
+    const ctx = ctxWith();
+    await findLocations.handler(findLocations.input.parse({ iso: 'US', limit: 2 }), ctx);
+    const guidance = getEnrichment(ctx).notice as string;
+    expect(guidance).toContain('raise limit (max 100)');
+    expect(guidance).not.toContain('request page');
   });
 
   it('handles a sparse bbox location (null distance/name/displayName) without inventing facts', async () => {

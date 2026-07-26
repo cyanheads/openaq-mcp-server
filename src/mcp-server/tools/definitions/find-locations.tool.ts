@@ -13,6 +13,9 @@ import { datetimePair } from '@/mcp-server/tools/shared/schema-helpers.js';
 import { getOpenAqService, interpretFound } from '@/services/openaq/openaq-service.js';
 import type { OpenAqLocation } from '@/services/openaq/types.js';
 
+/** Upstream page cap for `/v3/locations`. Past it, only `page` reaches more stations. */
+const LIMIT_MAX = 100;
+
 /** Reshape a raw location into the tool's domain output, sensors[] → parameters[]. */
 function shapeLocation(loc: OpenAqLocation) {
   return {
@@ -81,10 +84,18 @@ export const findLocations = tool('openaq_find_locations', {
       .number()
       .int()
       .min(1)
-      .max(100)
+      .max(LIMIT_MAX)
       .default(20)
       .describe(
         'Max stations to return (1–100). Default 20. Results are ordered by distance when searching by coordinates.',
+      ),
+    page: z
+      .number()
+      .int()
+      .min(1)
+      .default(1)
+      .describe(
+        'Which page of results to return (1-based). Default 1. The only way past the 100-station cap: with limit 100, page 2 returns stations 101–200. Distance ordering applies within a page, not across pages, so paging is for iso/bbox sweeps — a near-me coordinates search should stay on page 1.',
       ),
   }),
   output: z.object({
@@ -227,6 +238,7 @@ export const findLocations = tool('openaq_find_locations', {
         ...(input.iso ? { iso: input.iso } : {}),
         ...(input.parametersId !== undefined ? { parametersId: input.parametersId } : {}),
         limit: input.limit,
+        page: input.page,
       },
       ctx,
     );
@@ -248,12 +260,18 @@ export const findLocations = tool('openaq_find_locations', {
     if (isLowerBound) ctx.enrich({ totalCountIsLowerBound: true });
 
     if (locations.length >= input.limit) {
+      // At the 100 cap there is nowhere left for limit to go — the next page is the
+      // only way to reach station 101, so name it instead of repeating "raise limit".
+      const nextStep =
+        input.limit >= LIMIT_MAX
+          ? `request page ${input.page + 1}`
+          : `raise limit (max ${LIMIT_MAX})`;
       ctx.enrich.truncated({
         shown: locations.length,
         cap: input.limit,
         guidance: isLowerBound
-          ? `OpenAQ reports more than ${total} matching stations (a lower bound, not an exact count); showing ${locations.length}. Narrow with parametersId, a smaller radius, or a tighter bbox, or raise limit (max 100).`
-          : 'More stations may match. Narrow with parametersId, a smaller radius, or a tighter bbox, or raise limit (max 100).',
+          ? `OpenAQ reports more than ${total} matching stations (a lower bound, not an exact count); showing ${locations.length} on page ${input.page}. Narrow with parametersId, a smaller radius, or a tighter bbox, or ${nextStep}.`
+          : `More stations may match. Narrow with parametersId, a smaller radius, or a tighter bbox, or ${nextStep}.`,
       });
     } else if (isLowerBound) {
       // Lower bound without hitting the cap (rare) — still disclose it as a notice.
@@ -264,6 +282,7 @@ export const findLocations = tool('openaq_find_locations', {
 
     ctx.log.info('Found locations', {
       shown: locations.length,
+      page: input.page,
       scope: hasCoordinates ? 'coordinates' : hasBbox ? 'bbox' : 'iso',
     });
 
