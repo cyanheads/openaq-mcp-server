@@ -1,6 +1,6 @@
 # openaq-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 21:23:55
+Generated on: 2026-07-26 23:04:00
 
 ```text
 openaq-mcp-server/
@@ -147,7 +147,8 @@ openaq-mcp-server/
 │   │       │   └── list-parameters.tool.ts
 │   │       └── shared/
 │   │           ├── geo-input.ts
-│   │           └── schema-helpers.ts
+│   │           ├── schema-helpers.ts
+│   │           └── upstream-errors.ts
 │   ├── services/
 │   │   ├── openaq/
 │   │   │   ├── openaq-service.ts
@@ -170,7 +171,8 @@ openaq-mcp-server/
 │       ├── get-measurements.tool.test.ts
 │       ├── get-readings.tool.test.ts
 │       ├── list-countries.tool.test.ts
-│       └── list-parameters.tool.test.ts
+│       ├── list-parameters.tool.test.ts
+│       └── upstream-errors.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitattributes

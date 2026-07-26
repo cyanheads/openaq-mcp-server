@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-07-26
+
+Upstream 5xx/429/timeout/401 failures now carry the declared reason and recovery hint on the wire instead of arriving bare; openaq_get_readings no longer misreports three failure modes
+
 ## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-07-26
 
 openaq_list_countries gains a parametersId coverage filter and openaq_find_locations gains pagination past the 100-station cap; whitespace-tolerant coordinate/bbox parsing with readable rejection messages; empty-result responses no longer duplicate the miss across two content blocks; mcp-ts-core ^0.11.0 with TypeScript 7

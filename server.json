@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/openaq-mcp-server",
     "source": "github"
   },
-  "version": "0.1.4",
+  "version": "0.1.5",
   "remotes": [
     {
       "type": "streamable-http",
@@ -19,7 +19,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openaq-mcp-server",
       "runtimeHint": "node",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "packageArguments": [
         {
           "type": "positional",
@@ -69,7 +69,7 @@
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@cyanheads/openaq-mcp-server",
       "runtimeHint": "node",
-      "version": "0.1.4",
+      "version": "0.1.5",
       "packageArguments": [
         {
           "type": "positional",
