@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/openaq-mcp-server</h1>
-  <p><b>Find air-quality monitoring stations, read latest sensor values, and pull historical pollutant series via MCP. STDIO &amp; Streamable HTTP.</b>
+  <p><b>Find air-quality monitoring stations, read latest sensor values, and pull historical pollutant series via MCP. STDIO or Streamable HTTP.</b>
   <div>7 Tools (2 opt-in) • 2 Resources</div>
   </p>
 </div>
@@ -41,7 +41,7 @@ Five domain tools cover the workflow — discover stations, read current values,
 | `openaq_get_readings` | Latest measured value for every sensor at a station, each joined with its pollutant and unit. The current-conditions tool. |
 | `openaq_get_measurements` | Historical series for one pollutant at one station over a date range, with `raw`/`hourly`/`daily` aggregation. Large ranges spill to a DataCanvas. |
 | `openaq_list_parameters` | Catalog of measurable pollutants and their canonical units. The unit-disambiguation reference. |
-| `openaq_list_countries` | Catalog of country-level coverage — data span and parameters measured. An availability check before a regional sweep. |
+| `openaq_list_countries` | Catalog of country-level coverage — data span and parameters measured, filterable by `parametersId` to answer "which countries measure this pollutant?". An availability check before a regional sweep. |
 | `openaq_dataframe_describe` | List the tables and columns staged on a DataCanvas so you can write valid SQL. |
 | `openaq_dataframe_query` | Run a read-only `SELECT` over staged measurement series. |
 
@@ -52,6 +52,8 @@ Find air-quality monitoring stations (measured by physical sensors, not modeled)
 - Three search scopes — `coordinates` + `radius` (near-me), `bbox` (area sweep), or `iso` country code; at least one is required
 - `radius` is in metres, 1–25000 (the API hard-caps at 25000); larger areas need `bbox`, which returns no distance
 - `parametersId` narrows to stations that measure a given parameter (each returned station still lists all its sensors)
+- `limit` caps at 100 stations per page; `page` (1-based) reaches the rest — distance ordering applies within a page, not across pages, so paging is for `iso`/`bbox` sweeps rather than near-me searches
+- `coordinates` and `bbox` accept whitespace around the commas — `"47.6062, -122.3321"` is normalized to its space-free form
 - Returns each station's id, name, coordinates, distance (when searching by coordinates), country, provider, `isMonitor`/`isMobile`, the parameters its sensors measure with units, and the `datetimeFirst`/`datetimeLast` data span
 - Empty result means **no coverage, not clean air** — widen the radius, check `openaq_list_countries`, or fall back to the modeled `open-meteo` air-quality tool
 
@@ -95,6 +97,8 @@ You then query the full set with the two consumer tools:
 Pass a prior `canvas_id` back into `openaq_get_measurements` to stage a **second** station's series on the same canvas (as `measurements_<otherSensorId>`), then `JOIN`/`UNION` the two in one query to compare stations.
 
 **Requires `CANVAS_PROVIDER_TYPE=duckdb`.** Without it, `openaq_get_measurements` still returns the truncated preview plus a notice (it does not fail), and the two dataframe tools return a `canvas_unavailable` error directing you to enable DuckDB.
+
+**Not available in the `.mcpb` bundle.** The Claude Desktop bundle ships without DuckDB's platform-specific native binding — including it would lock the bundle to the OS it was packed on and push it far past the size registries accept. Leave `CANVAS_PROVIDER_TYPE` at `none` there; use the npm, `npx`, or Docker install for canvas work.
 
 `openaq_dataframe_query` is read-only by design — writes, DDL, and file/network table functions are rejected; only a single `SELECT` runs.
 

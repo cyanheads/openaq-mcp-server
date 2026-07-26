@@ -7,7 +7,8 @@
       "tsc-alias",
       "depcheck",
       "@cyanheads/mcp-ts-core",
-      "@duckdb/node-api"
+      "@duckdb/node-api",
+      "@socketsecurity/bun-security-scanner"
     ],
     "ignorePatterns": []
   },

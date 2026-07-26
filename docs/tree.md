@@ -1,6 +1,6 @@
 # openaq-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 17:28:55
+Generated on: 2026-07-26 21:23:55
 
 ```text
 openaq-mcp-server/
@@ -11,10 +11,12 @@ openaq-mcp-server/
 │   ├── mcp.json
 │   └── plugin.json
 ├── .github/
-│   └── ISSUE_TEMPLATE/
-│       ├── bug_report.yml
-│       ├── config.yml
-│       └── feature_request.yml
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   ├── config.yml
+│   │   └── feature_request.yml
+│   ├── FUNDING.yml
+│   └── SECURITY.md
 ├── .vscode/
 │   ├── extensions.json
 │   └── settings.json
@@ -171,6 +173,7 @@ openaq-mcp-server/
 │       └── list-parameters.tool.test.ts
 ├── .dockerignore
 ├── .env.example
+├── .gitattributes
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md
@@ -178,6 +181,7 @@ openaq-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

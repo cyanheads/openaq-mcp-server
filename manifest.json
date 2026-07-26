@@ -1,8 +1,8 @@
 {
   "manifest_version": "0.3",
   "name": "openaq-mcp-server",
-  "version": "0.1.3",
-  "description": "Find air-quality monitoring stations and read measured pollutant observations (PM2.5, PM10, O3, NO2, SO2, CO, and more) from government monitors worldwide via the OpenAQ v3 API, with DataCanvas SQL over historical series.",
+  "version": "0.1.4",
+  "description": "Find air-quality monitoring stations, read latest sensor values, and pull historical pollutant series via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -42,7 +42,7 @@
     "CANVAS_PROVIDER_TYPE": {
       "type": "string",
       "title": "DataCanvas provider",
-      "description": "Set to 'duckdb' to enable SQL analysis over large measurement series. Leave as 'none' to disable.",
+      "description": "Leave as 'none'. This bundle ships without DuckDB's platform-specific native binding, so 'duckdb' cannot start a canvas here — use the npm or Docker install for SQL analysis over large measurement series. With 'none', large series return a truncated preview plus a notice.",
       "required": false,
       "default": "none"
     }
