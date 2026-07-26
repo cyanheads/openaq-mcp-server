@@ -75,6 +75,59 @@ describe('openaq_list_countries', () => {
     expect(getEnrichment(ctx).notice).toContain('atlantis');
   });
 
+  it('filters to countries measuring a parameter id (#18)', async () => {
+    installStubService({ listCountries: async () => countries });
+    const ctx = createMockContext();
+    // id 8 (co ppm) is measured in the US fixture only; id 2 (pm25) in both.
+    const result = await listCountries.handler(listCountries.input.parse({ parametersId: 8 }), ctx);
+    expect(result.countries.map((c) => c.code)).toEqual(['US']);
+    expect(getEnrichment(ctx).totalCount).toBe(1);
+  });
+
+  it('composes parametersId with query (#18)', async () => {
+    installStubService({ listCountries: async () => countries });
+    const ctx = createMockContext();
+    // "d" is a substring of both "United States" and "India", so the query alone
+    // keeps both; parametersId 8 (co ppm, US only) is what narrows to one.
+    const result = await listCountries.handler(
+      listCountries.input.parse({ query: 'd', parametersId: 8 }),
+      ctx,
+    );
+    expect(result.countries.map((c) => c.code)).toEqual(['US']);
+  });
+
+  it('names the missed parameter id and the resolver in the notice (#18)', async () => {
+    installStubService({ listCountries: async () => countries });
+    const ctx = createMockContext();
+    const result = await listCountries.handler(
+      listCountries.input.parse({ parametersId: 99999 }),
+      ctx,
+    );
+    expect(result.countries).toHaveLength(0);
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('parametersId 99999');
+    expect(notice).toContain('openaq_list_parameters');
+  });
+
+  it('names both filters when a combined query + parametersId misses (#18)', async () => {
+    installStubService({ listCountries: async () => countries });
+    const ctx = createMockContext();
+    await listCountries.handler(
+      listCountries.input.parse({ query: 'india', parametersId: 8 }),
+      ctx,
+    );
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toContain('query "india"');
+    expect(notice).toContain('parametersId 8');
+  });
+
+  it('skips a country whose parameters is null instead of throwing (#18, #1)', async () => {
+    installStubService({ listCountries: async () => countriesWithNullParameters });
+    const ctx = createMockContext();
+    const result = await listCountries.handler(listCountries.input.parse({ parametersId: 2 }), ctx);
+    expect(result.countries.map((c) => c.code).sort()).toEqual(['IN', 'US']);
+  });
+
   it('returns a country with null parameters as empty array (regression #1)', async () => {
     installStubService({ listCountries: async () => countriesWithNullParameters });
     const ctx = createMockContext();
@@ -83,6 +136,13 @@ describe('openaq_list_countries', () => {
     expect(sparse).toBeDefined();
     expect(sparse?.parameters).toEqual([]);
     expect(getEnrichment(ctx).totalCount).toBe(3);
+  });
+
+  it('format emits no block for an empty result so the notice trailer stands alone (#9)', () => {
+    // The framework always appends the enrichment trailer (`**0 total**` + the
+    // blockquoted notice). Rendering a terse line here too would split the miss
+    // from its recovery guidance across two content blocks.
+    expect(listCountries.format!({ countries: [] })).toEqual([]);
   });
 
   it('format renders "none listed" for a country with no parameters (regression #1)', () => {

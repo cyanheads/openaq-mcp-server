@@ -22,6 +22,13 @@ export const listCountries = tool('openaq_list_countries', {
       .describe(
         'Case-insensitive filter over the bounded country catalog (~153) by code and name. A two-letter query is treated as an exact ISO 3166-1 alpha-2 code (e.g. "US" → United States); longer queries match as substrings (e.g. "united", "germany"). Omit to list all.',
       ),
+    parametersId: z
+      .number()
+      .int()
+      .optional()
+      .describe(
+        'Only return countries that measure this parameter id somewhere (e.g. 2 = PM2.5 µg/m³) — the one-call answer to "which countries have NO2 monitoring?". Get ids from openaq_list_parameters; the same pollutant has several ids for different units. Composes with query.',
+      ),
   }),
   output: z.object({
     countries: z
@@ -92,12 +99,27 @@ export const listCountries = tool('openaq_list_countries', {
         : all.filter((c) => c.code.toLowerCase().includes(q) || c.name.toLowerCase().includes(q));
     }
 
+    // Coverage filter: the country carries the union of parameters measured at any
+    // of its stations. `parameters` is nullable upstream (#1), so guard the miss.
+    const parametersId = input.parametersId;
+    if (parametersId !== undefined) {
+      filtered = filtered.filter((c) => c.parameters?.some((p) => p.id === parametersId) ?? false);
+    }
+
     ctx.enrich.total(filtered.length);
     if (filtered.length === 0) {
+      const criteria = [
+        ...(input.query ? [`query "${input.query}"`] : []),
+        ...(parametersId !== undefined ? [`parametersId ${parametersId}`] : []),
+      ];
+      const recovery =
+        parametersId !== undefined
+          ? 'Verify the id with openaq_list_parameters, or drop the filter to browse the full list.'
+          : 'Broaden or drop the filter to browse the full list.';
       ctx.enrich.notice(
-        input.query
-          ? `No countries matched "${input.query}". Broaden or drop the filter to browse the full list.`
-          : 'No countries returned from OpenAQ.',
+        criteria.length === 0
+          ? 'No countries returned from OpenAQ.'
+          : `No countries matched ${criteria.join(' and ')}. ${recovery}`,
       );
     }
 
@@ -116,9 +138,12 @@ export const listCountries = tool('openaq_list_countries', {
   },
 
   format: (result) => {
-    if (result.countries.length === 0) {
-      return [{ type: 'text', text: 'No countries matched.' }];
-    }
+    // Empty result: render nothing. The framework unconditionally appends the
+    // enrichment trailer (`**0 total**` plus the blockquoted notice naming the
+    // filter that missed), so it stands alone as the single content block — one
+    // paragraph. A terse line here would only split the miss from its recovery
+    // guidance across two blocks; it can never replace the trailer.
+    if (result.countries.length === 0) return [];
     const lines = result.countries.map((c) => {
       const span = `${c.datetimeFirst ?? 'unknown'} → ${c.datetimeLast ?? 'unknown'}`;
       const params =

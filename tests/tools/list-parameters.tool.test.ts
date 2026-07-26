@@ -62,6 +62,13 @@ describe('openaq_list_parameters', () => {
     expect(getEnrichment(ctx).notice).toContain('zzznotapollutant');
   });
 
+  it('format emits no block for an empty result so the notice trailer stands alone (#9)', () => {
+    // The framework always appends the enrichment trailer (`**0 total**` + the
+    // blockquoted notice). Rendering a terse line here too would split the miss
+    // from its recovery guidance across two content blocks.
+    expect(listParameters.format!({ parameters: [] })).toEqual([]);
+  });
+
   it('format renders id, code, unit, and display name', () => {
     const blocks = listParameters.format!({
       parameters: [

@@ -134,9 +134,12 @@ export const listParameters = tool('openaq_list_parameters', {
   },
 
   format: (result) => {
-    if (result.parameters.length === 0) {
-      return [{ type: 'text', text: 'No parameters matched.' }];
-    }
+    // Empty result: render nothing. The framework unconditionally appends the
+    // enrichment trailer (`**0 total**` plus the blockquoted notice naming the
+    // query that missed), so it stands alone as the single content block — one
+    // paragraph. A terse line here would only split the miss from its recovery
+    // guidance across two blocks; it can never replace the trailer.
+    if (result.parameters.length === 0) return [];
     const lines = result.parameters.map((p) => {
       const display = p.displayName ?? p.name;
       const desc = p.description ? ` — ${p.description}` : '';
