@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-07-26
+
+Six measurement-pipeline fixes: null gap-bucket values no longer fail output validation, mixed date/datetime ranges normalize correctly, a failed page or unavailable canvas preserves already-fetched rows, preview row counts are honest, and content text rounds display-only floating-point noise
+
 ## [0.1.5](changelog/0.1.x/0.1.5.md) — 2026-07-26
 
 Upstream 5xx/429/timeout/401 failures now carry the declared reason and recovery hint on the wire instead of arriving bare; openaq_get_readings no longer misreports three failure modes

@@ -1,6 +1,6 @@
 {
   "name": "openaq-mcp-server",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Find air-quality monitoring stations, read latest sensor values, and pull historical pollutant series via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "cyanheads",

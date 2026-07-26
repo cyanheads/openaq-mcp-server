@@ -1,6 +1,6 @@
 # openaq-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 23:04:00
+Generated on: 2026-07-26 23:55:41
 
 ```text
 openaq-mcp-server/
@@ -146,6 +146,7 @@ openaq-mcp-server/
 │   │       │   ├── list-countries.tool.ts
 │   │       │   └── list-parameters.tool.ts
 │   │       └── shared/
+│   │           ├── format-helpers.ts
 │   │           ├── geo-input.ts
 │   │           ├── schema-helpers.ts
 │   │           └── upstream-errors.ts
