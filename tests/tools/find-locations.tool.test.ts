@@ -5,7 +5,12 @@
  * @module tests/tools/find-locations.tool.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  rateLimited,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { findLocations } from '@/mcp-server/tools/definitions/find-locations.tool.js';
@@ -198,5 +203,58 @@ describe('openaq_find_locations', () => {
     expect(text).toContain('Seattle');
     expect(text).toContain('pm25 #2');
     expect(text).toContain('µg/m³');
+  });
+});
+
+describe('openaq_find_locations upstream error contract (#16)', () => {
+  it('surfaces a 5xx as upstream_error with the declared recovery hint', async () => {
+    installStubService({
+      findLocations: async () => {
+        throw serviceUnavailable('OpenAQ returned HTTP 500.', {
+          path: '/locations?limit=20',
+          status: 500,
+        });
+      },
+    });
+    await expect(
+      findLocations.handler(findLocations.input.parse({ iso: 'US' }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'upstream_error',
+        status: 500,
+        retryable: true,
+        // An upstream failure must not read as "no coverage here".
+        recovery: { hint: expect.stringContaining('coverage') },
+      },
+    });
+  });
+
+  it('surfaces a 429 as rate_limited', async () => {
+    installStubService({
+      findLocations: async () => {
+        throw rateLimited('OpenAQ rate limit exceeded.', { status: 429, retryAfter: '30' });
+      },
+    });
+    await expect(
+      findLocations.handler(findLocations.input.parse({ iso: 'US' }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryAfter: '30' },
+    });
+  });
+
+  it('surfaces a timeout as upstream_timeout, not no_locations_found', async () => {
+    installStubService({
+      findLocations: async () => {
+        throw timeout('OpenAQ did not respond within 15s.', { timeoutMs: 15_000 });
+      },
+    });
+    await expect(
+      findLocations.handler(findLocations.input.parse({ coordinates: '47.6,-122.3' }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'upstream_timeout' },
+    });
   });
 });

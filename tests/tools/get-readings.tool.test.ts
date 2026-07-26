@@ -1,12 +1,23 @@
 /**
  * @fileoverview openaq_get_readings tests — the latest×sensors JOIN (the headline
  * goal: every value carries its pollutant + unit), the coordinates resolution
- * path, scope validation, location_not_found, no_recent_values, and the
- * parametersId filter.
+ * path, scope validation, location_not_found, no_recent_values, the parametersId
+ * filter, and the error-contract corrections: each guard owns its reason, a
+ * parameter the station lacks reports as parameter_not_at_location, and upstream
+ * transport failures arrive as upstream_error / rate_limited / upstream_timeout /
+ * invalid_api_key.
  * @module tests/tools/get-readings.tool.test
  */
 
-import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  type McpError,
+  notFound,
+  rateLimited,
+  serviceUnavailable,
+  timeout,
+  unauthorized,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { getReadings } from '@/mcp-server/tools/definitions/get-readings.tool.js';
@@ -91,14 +102,170 @@ describe('openaq_get_readings', () => {
     });
   });
 
-  it('throws missing_coordinates_parameter when both locationId and coordinates are set', async () => {
+  it('throws invalid_location_scope when both locationId and coordinates are set (#13)', async () => {
     installStubService({});
     await expect(
       getReadings.handler(
         getReadings.input.parse({ locationId: 931, coordinates: '47.6,-122.3', parametersId: 2 }),
         ctxWith(),
       ),
-    ).rejects.toMatchObject({ data: { reason: 'missing_coordinates_parameter' } });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ValidationError,
+      message: expect.stringContaining('not both'),
+      data: {
+        reason: 'invalid_location_scope',
+        recovery: { hint: expect.stringContaining('exactly one') },
+      },
+    });
+  });
+
+  it('throws invalid_location_scope when neither locationId nor coordinates is set (#13)', async () => {
+    installStubService({});
+    await expect(getReadings.handler(getReadings.input.parse({}), ctxWith())).rejects.toMatchObject(
+      {
+        code: JsonRpcErrorCode.ValidationError,
+        message: expect.stringContaining('neither'),
+        data: {
+          reason: 'invalid_location_scope',
+          recovery: { hint: expect.stringContaining('exactly one') },
+        },
+      },
+    );
+  });
+
+  it('reserves missing_coordinates_parameter for coordinates without parametersId (#13)', async () => {
+    installStubService({});
+    const err = await getReadings
+      .handler(getReadings.input.parse({ coordinates: '47.6,-122.3' }), ctxWith())
+      .catch((e: McpError) => e);
+    // The two guards must not share a reason — this one keeps the parametersId hint.
+    expect(err.data).toMatchObject({ reason: 'missing_coordinates_parameter' });
+    expect((err.data as { recovery: { hint: string } }).recovery.hint).toContain('parametersId');
+  });
+
+  it('throws parameter_not_at_location, not no_recent_values, for a parameter the station lacks (#13)', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getLatest: async () => seattleLatest,
+    });
+    // Station 931 is live (sensors 1701/pm25 id 2, 1708/co id 8) but has no sensor
+    // for parameter 11 — a wrong-parameter error, not a dormant station.
+    await expect(
+      getReadings.handler(
+        getReadings.input.parse({ locationId: 931, parametersId: 11 }),
+        ctxWith(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'parameter_not_at_location',
+        locationId: 931,
+        parametersId: 11,
+        available: [2, 8],
+      },
+    });
+  });
+
+  it('no_station_near_coordinates recovery no longer advises widening past the ceiling (#13)', async () => {
+    installStubService({ findLocations: async () => ({ meta: { found: 0 }, results: [] }) });
+    const err = await getReadings
+      .handler(getReadings.input.parse({ coordinates: '0,-160', parametersId: 2 }), ctxWith())
+      .catch((e: McpError) => e);
+
+    expect(err.data).toMatchObject({ reason: 'no_station_near_coordinates' });
+    // The sweep already ran at the API's 25000m maximum, so "widen the radius" is a dead end.
+    const hint = (err.data as { recovery: { hint: string } }).recovery.hint;
+    expect(hint).not.toMatch(/radius/i);
+    expect(hint).not.toContain('25000');
+    expect(hint).toMatch(/bbox|different parametersId/i);
+  });
+
+  it('still throws no_recent_values when a present sensor has no current value (#13)', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      // Station reports pm25 (1701) but nothing for the co sensor (1708).
+      getLatest: async () => seattleLatest.filter((l) => l.sensorsId === 1701),
+    });
+    await expect(
+      getReadings.handler(getReadings.input.parse({ locationId: 931, parametersId: 8 }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_recent_values', locationId: 931, parametersId: 8 },
+    });
+  });
+
+  it('routes an upstream 5xx to upstream_error with the declared recovery (#16)', async () => {
+    installStubService({
+      getLocation: async () => {
+        throw serviceUnavailable('OpenAQ returned HTTP 500.', {
+          path: '/locations/931',
+          status: 500,
+        });
+      },
+      getLatest: async () => seattleLatest,
+    });
+    await expect(
+      getReadings.handler(getReadings.input.parse({ locationId: 931 }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'upstream_error',
+        status: 500,
+        retryable: true,
+        recovery: { hint: expect.stringContaining('backoff') },
+      },
+    });
+  });
+
+  it('routes a 429 to rate_limited during coordinate resolution (#16)', async () => {
+    installStubService({
+      findLocations: async () => {
+        throw rateLimited('OpenAQ rate limit exceeded.', { status: 429, retryAfter: '30' });
+      },
+    });
+    await expect(
+      getReadings.handler(
+        getReadings.input.parse({ coordinates: '47.6,-122.3', parametersId: 2 }),
+        ctxWith(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryAfter: '30' },
+    });
+  });
+
+  it('routes a request timeout to upstream_timeout (#16)', async () => {
+    installStubService({
+      getLocation: async () => {
+        throw timeout('OpenAQ did not respond within 15s.', { timeoutMs: 15_000 });
+      },
+      getLatest: async () => seattleLatest,
+    });
+    await expect(
+      getReadings.handler(getReadings.input.parse({ locationId: 931 }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'upstream_timeout', retryable: true },
+    });
+  });
+
+  it('routes a 401 to a non-retryable invalid_api_key', async () => {
+    installStubService({
+      getLocation: async () => {
+        throw unauthorized('OpenAQ rejected the API key.', { path: '/locations/931', status: 401 });
+      },
+      getLatest: async () => seattleLatest,
+    });
+    await expect(
+      getReadings.handler(getReadings.input.parse({ locationId: 931 }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Unauthorized,
+      data: {
+        reason: 'invalid_api_key',
+        retryable: false,
+        recovery: { hint: expect.stringContaining('OPENAQ_API_KEY') },
+      },
+    });
   });
 
   it('maps an upstream 404 to location_not_found', async () => {

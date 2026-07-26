@@ -5,6 +5,12 @@
  * @module tests/tools/list-parameters.tool.test
  */
 
+import {
+  JsonRpcErrorCode,
+  rateLimited,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listParameters } from '@/mcp-server/tools/definitions/list-parameters.tool.js';
@@ -79,5 +85,59 @@ describe('openaq_list_parameters', () => {
     expect(text).toContain('8');
     expect(text).toContain('co');
     expect(text).toContain('ppm');
+  });
+});
+
+describe('openaq_list_parameters upstream error contract (#16)', () => {
+  const ctxWith = () => createMockContext({ errors: listParameters.errors });
+
+  it('surfaces a 5xx as upstream_error with the declared recovery hint', async () => {
+    installStubService({
+      listParameters: async () => {
+        throw serviceUnavailable('OpenAQ returned HTTP 503.', {
+          path: '/parameters?limit=1000',
+          status: 503,
+        });
+      },
+    });
+    await expect(
+      listParameters.handler(listParameters.input.parse({}), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'upstream_error',
+        status: 503,
+        retryable: true,
+        recovery: { hint: expect.stringContaining('backoff') },
+      },
+    });
+  });
+
+  it('surfaces a 429 as rate_limited', async () => {
+    installStubService({
+      listParameters: async () => {
+        throw rateLimited('OpenAQ rate limit exceeded.', { status: 429, retryAfter: '12' });
+      },
+    });
+    await expect(
+      listParameters.handler(listParameters.input.parse({}), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: { reason: 'rate_limited', retryAfter: '12' },
+    });
+  });
+
+  it('surfaces a timeout as upstream_timeout', async () => {
+    installStubService({
+      listParameters: async () => {
+        throw timeout('OpenAQ did not respond within 15s.', { timeoutMs: 15_000 });
+      },
+    });
+    await expect(
+      listParameters.handler(listParameters.input.parse({}), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'upstream_timeout' },
+    });
   });
 });

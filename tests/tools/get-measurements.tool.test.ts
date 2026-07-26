@@ -7,7 +7,13 @@
  */
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
+import {
+  JsonRpcErrorCode,
+  notFound,
+  rateLimited,
+  serviceUnavailable,
+  timeout,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getMeasurements } from '@/mcp-server/tools/definitions/get-measurements.tool.js';
@@ -234,5 +240,71 @@ describe('openaq_get_measurements', () => {
     expect(text).toContain('#2');
     expect(text).toContain('abc1234567');
     expect(text).toContain('measurements_1701');
+  });
+});
+
+describe('openaq_get_measurements error contract (#16)', () => {
+  const args = { locationId: 931, parametersId: 2 };
+
+  it('surfaces a 5xx on the location lookup as upstream_error, not location_not_found', async () => {
+    installStubService({
+      getLocation: async () => {
+        throw serviceUnavailable('OpenAQ returned HTTP 500.', {
+          path: '/locations/931',
+          status: 500,
+        });
+      },
+    });
+    await expect(
+      getMeasurements.handler(getMeasurements.input.parse(args), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'upstream_error',
+        status: 500,
+        retryable: true,
+        recovery: { hint: expect.stringContaining('backoff') },
+      },
+    });
+  });
+
+  it('surfaces a 429 raised mid-paging as rate_limited', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => {
+        throw rateLimited('OpenAQ rate limit exceeded.', { status: 429, retryAfter: '30' });
+      },
+    });
+    await expect(
+      getMeasurements.handler(getMeasurements.input.parse(args), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: {
+        reason: 'rate_limited',
+        retryAfter: '30',
+        recovery: { hint: expect.stringContaining('daily') },
+      },
+    });
+  });
+
+  it('surfaces a timeout raised mid-paging as upstream_timeout', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => {
+        throw timeout('OpenAQ did not respond within 15s.', { timeoutMs: 15_000 });
+      },
+    });
+    await expect(
+      getMeasurements.handler(getMeasurements.input.parse(args), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'upstream_timeout', timeoutMs: 15_000 },
+    });
+  });
+
+  it('declares canvas_not_found for the canvas_id reuse input', () => {
+    // canvas.acquire() throws it from inside the framework, so the contract is the
+    // only place it can be advertised to a client.
+    expect(getMeasurements.errors?.map((e) => e.reason)).toContain('canvas_not_found');
   });
 });

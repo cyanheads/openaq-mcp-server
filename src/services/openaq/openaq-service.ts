@@ -11,6 +11,11 @@
  *    coordinates=999,999). Defended at the Zod edge; backstop → transient
  *    ServiceUnavailable, never SerializationError.
  *  - 429 → RateLimited, retryable (honor Retry-After).
+ *  - 401 `{"detail":"Invalid credentials"}` for a rejected key, `{"message":"…"}`
+ *    for a missing one → Unauthorized. Outside the transient set, so `withRetry`
+ *    fails fast instead of replaying a request that can never succeed.
+ *  - request timeout → Timeout, distinct from ServiceUnavailable so a slow
+ *    upstream is distinguishable from a broken one at the classification layer.
  * @module services/openaq/openaq-service
  */
 
@@ -20,6 +25,8 @@ import {
   notFound,
   rateLimited,
   serviceUnavailable,
+  timeout as timeoutError,
+  unauthorized,
   validationError,
 } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
@@ -124,7 +131,13 @@ export class OpenAqService {
       });
     } catch (err) {
       if (timeout.aborted) {
-        throw serviceUnavailable('OpenAQ request timed out.', { path }, { cause: err });
+        // Timeout, not ServiceUnavailable — a slow upstream and a broken one call
+        // for different client behaviour, and the code is what carries that.
+        throw timeoutError(
+          `OpenAQ did not respond within ${FETCH_TIMEOUT_MS / 1000}s.`,
+          { path, timeoutMs: FETCH_TIMEOUT_MS },
+          { cause: err },
+        );
       }
       // Network-level failure (DNS, connection reset) — transient.
       throw serviceUnavailable('OpenAQ request failed.', { path }, { cause: err });
@@ -156,6 +169,11 @@ export class OpenAqService {
     }
     if (status === 422) {
       throw validationError(extractValidationMessage(body), { path, status });
+    }
+    if (status === 401) {
+      // Live-probed: both a missing key and a rejected one return 401. Never
+      // retryable — the key is server config, so replaying cannot fix it.
+      throw unauthorized('OpenAQ rejected the API key.', { path, status });
     }
     if (status === 429) {
       const retryAfter = response.headers.get('retry-after');

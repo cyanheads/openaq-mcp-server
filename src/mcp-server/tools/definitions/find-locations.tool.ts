@@ -10,6 +10,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { bboxSchema, coordinatesSchema } from '@/mcp-server/tools/shared/geo-input.js';
 import { datetimePair } from '@/mcp-server/tools/shared/schema-helpers.js';
+import { withUpstream } from '@/mcp-server/tools/shared/upstream-errors.js';
 import { getOpenAqService, interpretFound } from '@/services/openaq/openaq-service.js';
 import type { OpenAqLocation } from '@/services/openaq/types.js';
 
@@ -217,9 +218,34 @@ export const findLocations = tool('openaq_find_locations', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'OpenAQ returned 5xx, a rate-limit (429), or timed out.',
-      recovery: 'Retry after a short backoff. The free tier allows about 60 requests per minute.',
+      when: 'OpenAQ returned 5xx or an unreadable body on every retry.',
+      recovery:
+        'Retry after a short backoff; if it keeps failing, OpenAQ is degraded — an error here says nothing about station coverage.',
       retryable: true,
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'OpenAQ returned 429 — the request budget for this key is exhausted.',
+      recovery:
+        'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; the free tier allows roughly 60 requests per minute.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'OpenAQ did not respond within the request timeout on every retry.',
+      recovery:
+        'Retry once after a short pause, or narrow the search area with a smaller radius or a tighter bbox.',
+      retryable: true,
+    },
+    {
+      reason: 'invalid_api_key',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'OpenAQ returned 401 — the configured OPENAQ_API_KEY is missing, invalid, or revoked.',
+      recovery:
+        "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
+      retryable: false,
     },
   ],
 
@@ -231,16 +257,18 @@ export const findLocations = tool('openaq_find_locations', {
       throw ctx.fail('no_search_scope', undefined, { ...ctx.recoveryFor('no_search_scope') });
     }
 
-    const res = await getOpenAqService().findLocations(
-      {
-        ...(input.coordinates ? { coordinates: input.coordinates, radius: input.radius } : {}),
-        ...(input.bbox ? { bbox: input.bbox } : {}),
-        ...(input.iso ? { iso: input.iso } : {}),
-        ...(input.parametersId !== undefined ? { parametersId: input.parametersId } : {}),
-        limit: input.limit,
-        page: input.page,
-      },
-      ctx,
+    const res = await withUpstream(ctx, () =>
+      getOpenAqService().findLocations(
+        {
+          ...(input.coordinates ? { coordinates: input.coordinates, radius: input.radius } : {}),
+          ...(input.bbox ? { bbox: input.bbox } : {}),
+          ...(input.iso ? { iso: input.iso } : {}),
+          ...(input.parametersId !== undefined ? { parametersId: input.parametersId } : {}),
+          limit: input.limit,
+          page: input.page,
+        },
+        ctx,
+      ),
     );
 
     const locations = res.results.map(shapeLocation);

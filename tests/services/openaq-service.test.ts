@@ -159,6 +159,21 @@ describe('OpenAqService error classification', () => {
     vi.useRealTimers();
   });
 
+  it('throws Unauthorized on a 401 and does not retry it', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () =>
+        errorResponse(401, JSON.stringify({ detail: 'Invalid credentials' })),
+      );
+    const svc = makeService();
+    await expect(svc.listCountries(createMockContext())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Unauthorized,
+      data: { status: 401 },
+    });
+    // A rejected key is server config — replaying the request can never fix it.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('maps the plain-text 500 (bad coords) to ServiceUnavailable, not SerializationError', async () => {
     vi.useFakeTimers();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
@@ -181,6 +196,38 @@ describe('OpenAqService error classification', () => {
     const svc = makeService();
     await expectClassifiedAfterRetries(
       svc.listParameters(createMockContext()),
+      JsonRpcErrorCode.ServiceUnavailable,
+    );
+    vi.useRealTimers();
+  });
+
+  it('classifies a request timeout as Timeout, not ServiceUnavailable', async () => {
+    vi.useFakeTimers();
+    // Own the timeout signal so the 15s deadline can be tripped synchronously —
+    // AbortSignal.timeout's internal timer is not driven by fake timers.
+    const deadline = new AbortController();
+    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      deadline.abort();
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    });
+    const svc = makeService();
+    await expectClassifiedAfterRetries(
+      svc.listCountries(createMockContext()),
+      JsonRpcErrorCode.Timeout,
+    );
+    vi.useRealTimers();
+  });
+
+  it('still classifies a non-timeout network failure as ServiceUnavailable', async () => {
+    vi.useFakeTimers();
+    // The deadline never trips — only the connection fails.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+      throw new TypeError('fetch failed');
+    });
+    const svc = makeService();
+    await expectClassifiedAfterRetries(
+      svc.listCountries(createMockContext()),
       JsonRpcErrorCode.ServiceUnavailable,
     );
     vi.useRealTimers();

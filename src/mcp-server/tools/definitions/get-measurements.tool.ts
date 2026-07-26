@@ -10,6 +10,7 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { isNotFound } from '@/mcp-server/tools/shared/schema-helpers.js';
+import { upstreamFailure, withUpstream } from '@/mcp-server/tools/shared/upstream-errors.js';
 import { getCanvas } from '@/services/canvas-accessor.js';
 import { getOpenAqService } from '@/services/openaq/openaq-service.js';
 import type { OpenAqLocation, OpenAqMeasurement } from '@/services/openaq/types.js';
@@ -234,11 +235,44 @@ export const getMeasurements = tool('openaq_get_measurements', {
       retryable: false,
     },
     {
+      reason: 'canvas_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The supplied canvas_id is unknown or has expired, so the series cannot be staged onto it.',
+      recovery:
+        'Omit canvas_id to stage the series on a fresh canvas, or re-run the call that produced the id you meant to reuse.',
+      retryable: false,
+    },
+    {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'OpenAQ returned 5xx, a rate-limit (429), or timed out.',
-      recovery: 'Retry after a short backoff.',
+      when: 'OpenAQ returned 5xx or an unreadable body on every retry.',
+      recovery:
+        'Retry after a short backoff; if it keeps failing, OpenAQ is degraded and the series is briefly unavailable.',
       retryable: true,
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'OpenAQ returned 429 — the request budget for this key is exhausted.',
+      recovery:
+        'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; long raw ranges page internally and spend several requests, so prefer daily aggregation.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'OpenAQ did not respond within the request timeout on every retry.',
+      recovery:
+        'Retry once after a short pause, then narrow the date range or switch aggregation to daily so each page is smaller.',
+      retryable: true,
+    },
+    {
+      reason: 'invalid_api_key',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'OpenAQ returned 401 — the configured OPENAQ_API_KEY is missing, invalid, or revoked.',
+      recovery:
+        "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
+      retryable: false,
     },
   ],
 
@@ -262,7 +296,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
           { cause: err },
         );
       }
-      throw err;
+      throw upstreamFailure(ctx, err);
     }
 
     const sensor = location.sensors.find((s) => s.parameter.id === input.parametersId);
@@ -285,16 +319,18 @@ export const getMeasurements = tool('openaq_get_measurements', {
     let found = 0;
     let exhausted = false;
     for (let page = 1; allRows.length < MAX_ROWS; page++) {
-      const result = await service.getMeasurements(
-        sensor.id,
-        {
-          ...(input.datetimeFrom ? { datetimeFrom: input.datetimeFrom } : {}),
-          ...(input.datetimeTo ? { datetimeTo: input.datetimeTo } : {}),
-          aggregation: input.aggregation,
-          limit: pageSize,
-          page,
-        },
-        ctx,
+      const result = await withUpstream(ctx, () =>
+        service.getMeasurements(
+          sensor.id,
+          {
+            ...(input.datetimeFrom ? { datetimeFrom: input.datetimeFrom } : {}),
+            ...(input.datetimeTo ? { datetimeTo: input.datetimeTo } : {}),
+            aggregation: input.aggregation,
+            limit: pageSize,
+            page,
+          },
+          ctx,
+        ),
       );
       found = result.found;
       allRows.push(...result.results.map(toSeriesRow));

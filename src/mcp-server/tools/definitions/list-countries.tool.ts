@@ -8,6 +8,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { withUpstream } from '@/mcp-server/tools/shared/upstream-errors.js';
 import { getOpenAqService } from '@/services/openaq/openaq-service.js';
 
 export const listCountries = tool('openaq_list_countries', {
@@ -78,14 +79,39 @@ export const listCountries = tool('openaq_list_countries', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'OpenAQ /countries returned 5xx, a rate-limit, or timed out.',
-      recovery: 'Retry after a short backoff. The free tier allows about 60 requests per minute.',
+      when: 'OpenAQ /countries returned 5xx or an unreadable body on every retry.',
+      recovery:
+        'Retry after a short backoff; if it keeps failing, OpenAQ is degraded and the catalog is briefly unavailable.',
       retryable: true,
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'OpenAQ returned 429 — the request budget for this key is exhausted.',
+      recovery:
+        'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; the free tier allows roughly 60 requests per minute.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'OpenAQ /countries did not respond within the request timeout on every retry.',
+      recovery:
+        'Retry once after a short pause; a timeout here means OpenAQ is slow, not that coverage is missing.',
+      retryable: true,
+    },
+    {
+      reason: 'invalid_api_key',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'OpenAQ returned 401 — the configured OPENAQ_API_KEY is missing, invalid, or revoked.',
+      recovery:
+        "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
+      retryable: false,
     },
   ],
 
   async handler(input, ctx) {
-    const all = await getOpenAqService().listCountries(ctx);
+    const all = await withUpstream(ctx, () => getOpenAqService().listCountries(ctx));
     let filtered = all;
 
     if (input.query) {

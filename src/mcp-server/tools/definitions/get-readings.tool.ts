@@ -11,6 +11,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { coordinatesSchema } from '@/mcp-server/tools/shared/geo-input.js';
 import { datetimePair, isNotFound } from '@/mcp-server/tools/shared/schema-helpers.js';
+import { upstreamFailure, withUpstream } from '@/mcp-server/tools/shared/upstream-errors.js';
 import { getOpenAqService } from '@/services/openaq/openaq-service.js';
 import type { OpenAqLocation } from '@/services/openaq/types.js';
 
@@ -23,6 +24,13 @@ import type { OpenAqLocation } from '@/services/openaq/types.js';
  * so the nearest is effectively always in the pool.
  */
 const NEAREST_CANDIDATE_LIMIT = 100;
+
+/**
+ * Radius for the nearest-station sweep — the API's hard maximum, so a miss here
+ * has already searched as wide as OpenAQ allows. The `no_station_near_coordinates`
+ * recovery must therefore not suggest widening it.
+ */
+const NEAREST_SEARCH_RADIUS_M = 25_000;
 
 export const getReadings = tool('openaq_get_readings', {
   title: 'openaq-mcp-server: get readings',
@@ -119,19 +127,35 @@ export const getReadings = tool('openaq_get_readings', {
       retryable: false,
     },
     {
+      reason: 'parameter_not_at_location',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'No sensor at the resolved station measures parametersId (often the wrong unit variant was chosen).',
+      recovery:
+        'Pick one of the ids listed in data.available, or confirm the id and its unit in openaq_list_parameters — the same pollutant has different ids for µg/m³ vs ppm vs ppb.',
+      retryable: false,
+    },
+    {
       reason: 'no_station_near_coordinates',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No station within 25km of coordinates measures the requested parametersId.',
+      when: 'The 25km auto-resolution sweep found no station measuring the requested parametersId.',
       recovery:
-        'Widen your search with openaq_find_locations (radius up to 25000m), try a different parametersId, or use the modeled open-meteo air-quality tool for coverage. No station does not mean clean air.',
+        'Try a different parametersId, sweep a wider area with an openaq_find_locations bbox query, or fall back to the modeled open-meteo air-quality tool. No station does not mean clean air.',
       retryable: false,
     },
     {
       reason: 'no_recent_values',
       code: JsonRpcErrorCode.NotFound,
-      when: 'The station exists but its latest feed returned no values (no recent reporting).',
+      when: 'The station has the requested sensors but its latest feed carried no values for them.',
       recovery:
         'Check datetimeLast from openaq_find_locations; the station may be dormant. Try a nearby station.',
+      retryable: false,
+    },
+    {
+      reason: 'invalid_location_scope',
+      code: JsonRpcErrorCode.ValidationError,
+      when: 'Both locationId and coordinates were provided, or neither was.',
+      recovery:
+        'Pass exactly one — a locationId from openaq_find_locations to read a known station, or coordinates plus parametersId to auto-resolve the nearest one.',
       retryable: false,
     },
     {
@@ -145,9 +169,34 @@ export const getReadings = tool('openaq_get_readings', {
     {
       reason: 'upstream_error',
       code: JsonRpcErrorCode.ServiceUnavailable,
-      when: 'OpenAQ returned 5xx, a rate-limit (429), or timed out.',
-      recovery: 'Retry after a short backoff.',
+      when: 'OpenAQ returned 5xx or an unreadable body on every retry.',
+      recovery:
+        'Retry after a short backoff; if it keeps failing, OpenAQ is degraded and current conditions are briefly unavailable.',
       retryable: true,
+    },
+    {
+      reason: 'rate_limited',
+      code: JsonRpcErrorCode.RateLimited,
+      when: 'OpenAQ returned 429 — the request budget for this key is exhausted.',
+      recovery:
+        'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; the free tier allows roughly 60 requests per minute.',
+      retryable: true,
+    },
+    {
+      reason: 'upstream_timeout',
+      code: JsonRpcErrorCode.Timeout,
+      when: 'OpenAQ did not respond within the request timeout on every retry.',
+      recovery:
+        'Retry once after a short pause; passing a known locationId skips the nearest-station sweep and costs one fewer request.',
+      retryable: true,
+    },
+    {
+      reason: 'invalid_api_key',
+      code: JsonRpcErrorCode.Unauthorized,
+      when: 'OpenAQ returned 401 — the configured OPENAQ_API_KEY is missing, invalid, or revoked.',
+      recovery:
+        "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
+      retryable: false,
     },
   ],
 
@@ -158,9 +207,11 @@ export const getReadings = tool('openaq_get_readings', {
 
     if (hasLocationId === hasCoordinates) {
       throw ctx.fail(
-        'missing_coordinates_parameter',
-        'Provide exactly one of locationId or coordinates.',
-        { ...ctx.recoveryFor('missing_coordinates_parameter') },
+        'invalid_location_scope',
+        hasLocationId
+          ? 'Provide either locationId or coordinates, not both.'
+          : 'Provide either a locationId or coordinates — neither was given.',
+        { ...ctx.recoveryFor('invalid_location_scope') },
       );
     }
     if (hasCoordinates && input.parametersId === undefined) {
@@ -176,20 +227,24 @@ export const getReadings = tool('openaq_get_readings', {
     if (hasCoordinates) {
       // Pull a candidate pool (not limit:1) so the service's distance sort can pick
       // the true nearest — upstream order alone can surface a farther station first.
-      const found = await service.findLocations(
-        {
-          coordinates: input.coordinates as string,
-          radius: 25000,
-          parametersId: input.parametersId as number,
-          limit: NEAREST_CANDIDATE_LIMIT,
-        },
-        ctx,
+      const found = await withUpstream(ctx, () =>
+        service.findLocations(
+          {
+            coordinates: input.coordinates as string,
+            radius: NEAREST_SEARCH_RADIUS_M,
+            parametersId: input.parametersId as number,
+            limit: NEAREST_CANDIDATE_LIMIT,
+          },
+          ctx,
+        ),
       );
       const nearest = found.results[0];
       if (!nearest) {
-        throw ctx.fail('no_station_near_coordinates', undefined, {
-          ...ctx.recoveryFor('no_station_near_coordinates'),
-        });
+        throw ctx.fail(
+          'no_station_near_coordinates',
+          `No station within ${NEAREST_SEARCH_RADIUS_M / 1000}km of ${input.coordinates} measures parameter ${input.parametersId}.`,
+          { ...ctx.recoveryFor('no_station_near_coordinates') },
+        );
       }
       locationId = nearest.id;
       distanceMeters = nearest.distance;
@@ -215,7 +270,26 @@ export const getReadings = tool('openaq_get_readings', {
           { cause: err },
         );
       }
-      throw err;
+      throw upstreamFailure(ctx, err);
+    }
+
+    // A parametersId the station has no sensor for is a wrong-parameter error, not
+    // a dormant station — decide that from the sensor map, before the join empties
+    // the array and makes a live station look like it stopped reporting.
+    if (
+      input.parametersId !== undefined &&
+      !location.sensors.some((s) => s.parameter.id === input.parametersId)
+    ) {
+      throw ctx.fail(
+        'parameter_not_at_location',
+        `Station ${locationId} has no sensor for parameter ${input.parametersId}.`,
+        {
+          locationId,
+          parametersId: input.parametersId,
+          available: location.sensors.map((s) => s.parameter.id),
+          ...ctx.recoveryFor('parameter_not_at_location'),
+        },
+      );
     }
 
     // Join latest values against the sensor→parameter→unit map on sensorsId.
@@ -240,10 +314,19 @@ export const getReadings = tool('openaq_get_readings', {
     }
 
     if (readings.length === 0) {
-      throw ctx.fail('no_recent_values', `Station ${locationId} returned no recent values.`, {
-        locationId,
-        ...ctx.recoveryFor('no_recent_values'),
-      });
+      // The station does have the sensor (checked above) — it simply has not
+      // reported a value for it, so name the sensor rather than the whole station.
+      throw ctx.fail(
+        'no_recent_values',
+        input.parametersId !== undefined
+          ? `Station ${locationId} measures parameter ${input.parametersId} but returned no recent value for it.`
+          : `Station ${locationId} returned no recent values.`,
+        {
+          locationId,
+          ...(input.parametersId !== undefined ? { parametersId: input.parametersId } : {}),
+          ...ctx.recoveryFor('no_recent_values'),
+        },
+      );
     }
 
     ctx.log.info('Resolved readings', { locationId, count: readings.length });

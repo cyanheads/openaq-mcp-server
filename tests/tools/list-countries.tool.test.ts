@@ -5,6 +5,13 @@
  * @module tests/tools/list-countries.tool.test
  */
 
+import {
+  JsonRpcErrorCode,
+  rateLimited,
+  serviceUnavailable,
+  timeout,
+  unauthorized,
+} from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it } from 'vitest';
 import { listCountries } from '@/mcp-server/tools/definitions/list-countries.tool.js';
@@ -180,5 +187,82 @@ describe('openaq_list_countries', () => {
     expect(text).toContain('US');
     expect(text).toContain('155');
     expect(text).toContain('pm25');
+  });
+});
+
+describe('openaq_list_countries upstream error contract (#16)', () => {
+  const ctxWith = () => createMockContext({ errors: listCountries.errors });
+
+  it('surfaces a 5xx as upstream_error with the declared recovery hint', async () => {
+    installStubService({
+      listCountries: async () => {
+        throw serviceUnavailable('OpenAQ returned HTTP 500.', {
+          path: '/countries?limit=1000',
+          status: 500,
+        });
+      },
+    });
+    await expect(
+      listCountries.handler(listCountries.input.parse({}), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      data: {
+        reason: 'upstream_error',
+        status: 500,
+        retryable: true,
+        recovery: { hint: expect.stringContaining('backoff') },
+      },
+    });
+  });
+
+  it('surfaces a 429 as rate_limited, distinct from a generic 5xx', async () => {
+    installStubService({
+      listCountries: async () => {
+        throw rateLimited('OpenAQ rate limit exceeded.', { status: 429, retryAfter: '30' });
+      },
+    });
+    await expect(
+      listCountries.handler(listCountries.input.parse({}), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RateLimited,
+      data: {
+        reason: 'rate_limited',
+        retryAfter: '30',
+        recovery: { hint: expect.stringContaining('retryAfter') },
+      },
+    });
+  });
+
+  it('surfaces a timeout as upstream_timeout', async () => {
+    installStubService({
+      listCountries: async () => {
+        throw timeout('OpenAQ did not respond within 15s.', { timeoutMs: 15_000 });
+      },
+    });
+    await expect(
+      listCountries.handler(listCountries.input.parse({}), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { reason: 'upstream_timeout', timeoutMs: 15_000 },
+    });
+  });
+
+  it('surfaces a 401 as a non-retryable invalid_api_key, not a retryable upstream_error', async () => {
+    installStubService({
+      listCountries: async () => {
+        throw unauthorized('OpenAQ rejected the API key.', { path: '/countries', status: 401 });
+      },
+    });
+    await expect(
+      listCountries.handler(listCountries.input.parse({}), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Unauthorized,
+      data: {
+        reason: 'invalid_api_key',
+        retryable: false,
+        status: 401,
+        recovery: { hint: expect.stringContaining('OPENAQ_API_KEY') },
+      },
+    });
   });
 });
