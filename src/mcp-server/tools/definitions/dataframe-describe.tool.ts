@@ -44,6 +44,14 @@ export const dataframeDescribe = tool('openaq_dataframe_describe', {
         'Set CANVAS_PROVIDER_TYPE=duckdb and restart the server to enable SQL over staged measurement series.',
       retryable: false,
     },
+    {
+      reason: 'canvas_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'The canvas_id is unknown or its canvas has expired.',
+      recovery:
+        'Re-run openaq_get_measurements with a range large enough to spill, and use the canvas_id it returns.',
+      retryable: false,
+    },
   ],
 
   async handler(input, ctx) {

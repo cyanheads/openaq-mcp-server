@@ -6,7 +6,7 @@
  */
 
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dataframeDescribe } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
@@ -102,5 +102,88 @@ describe('openaq_dataframe_describe', () => {
     );
     expect(result.tables).toHaveLength(0);
     expect(getEnrichment(ctx).notice).toMatch(/no tables|get_measurements/i);
+  });
+});
+
+/**
+ * The canvas throws these from inside the framework, before handler code runs, so
+ * `ctx.fail` can never be the source — the contract is the only place they can be
+ * advertised. These assert the declaration exists and that the runtime error the
+ * framework raises actually matches the code and reason declared for it.
+ */
+describe('canvas failure modes are declared, not just thrown (#16)', () => {
+  const throwingCanvas = (err: Error) =>
+    ({
+      acquire: vi.fn(async () => {
+        throw err;
+      }),
+    }) as unknown as DataCanvas;
+
+  const canvasNotFound = () =>
+    notFound('Canvas not found or expired.', {
+      reason: 'canvas_not_found',
+      canvasId: 'gone',
+      recovery: { hint: 'Re-run the tool that produced this canvas_id to stage fresh data.' },
+    });
+
+  it('openaq_dataframe_describe declares canvas_not_found at the code it arrives with', async () => {
+    const entry = dataframeDescribe.errors?.find((e) => e.reason === 'canvas_not_found');
+    expect(entry?.code).toBe(JsonRpcErrorCode.NotFound);
+
+    setCanvas(throwingCanvas(canvasNotFound()));
+    await expect(
+      dataframeDescribe.handler(
+        dataframeDescribe.input.parse({ canvas_id: 'gone' }),
+        createMockContext({ errors: dataframeDescribe.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'canvas_not_found' },
+    });
+  });
+
+  it('openaq_dataframe_query declares canvas_not_found at the code it arrives with', async () => {
+    const entry = dataframeQuery.errors?.find((e) => e.reason === 'canvas_not_found');
+    expect(entry?.code).toBe(JsonRpcErrorCode.NotFound);
+
+    setCanvas(throwingCanvas(canvasNotFound()));
+    await expect(
+      dataframeQuery.handler(
+        dataframeQuery.input.parse({ canvas_id: 'gone', sql: 'SELECT 1' }),
+        createMockContext({ errors: dataframeQuery.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'canvas_not_found' },
+    });
+  });
+
+  it('openaq_dataframe_query declares missing_table and points at describe for recovery', async () => {
+    const entry = dataframeQuery.errors?.find((e) => e.reason === 'missing_table');
+    expect(entry?.code).toBe(JsonRpcErrorCode.NotFound);
+    expect(entry?.recovery).toContain('openaq_dataframe_describe');
+
+    const query = vi.fn(async () => {
+      throw notFound('Canvas table "measurements_9" does not exist.', {
+        reason: 'missing_table',
+        tableName: 'measurements_9',
+      });
+    });
+    setCanvas({
+      acquire: vi.fn(async () => ({ canvasId: 'abc1234567', query })),
+    } as unknown as DataCanvas);
+
+    await expect(
+      dataframeQuery.handler(
+        dataframeQuery.input.parse({
+          canvas_id: 'abc1234567',
+          sql: 'SELECT * FROM measurements_9',
+        }),
+        createMockContext({ errors: dataframeQuery.errors }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'missing_table', tableName: 'measurements_9' },
+    });
   });
 });
