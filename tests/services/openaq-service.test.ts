@@ -174,6 +174,21 @@ describe('OpenAqService error classification', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('maps a 408 to Timeout and fails fast — the same page offset 408s on every replay (#12)', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation(async () => errorResponse(408, 'Request Timeout'));
+    const svc = makeService();
+    await expect(
+      svc.getMeasurements(3425, { aggregation: 'raw', limit: 1000, page: 5 }, createMockContext()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      data: { status: 408, retryable: false },
+    });
+    // `retryable: false` opts out of withRetry — 3 attempts here cost ~38s upstream.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('maps the plain-text 500 (bad coords) to ServiceUnavailable, not SerializationError', async () => {
     vi.useFakeTimers();
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>

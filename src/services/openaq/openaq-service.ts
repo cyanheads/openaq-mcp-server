@@ -11,6 +11,8 @@
  *    coordinates=999,999). Defended at the Zod edge; backstop → transient
  *    ServiceUnavailable, never SerializationError.
  *  - 429 → RateLimited, retryable (honor Retry-After).
+ *  - 408 on a deep measurements page offset → Timeout, marked `retryable: false`
+ *    so `withRetry` fails fast: the same offset returns 408 on every replay.
  *  - 401 `{"detail":"Invalid credentials"}` for a rejected key, `{"message":"…"}`
  *    for a missing one → Unauthorized. Outside the transient set, so `withRetry`
  *    fails fast instead of replaying a request that can never succeed.
@@ -181,6 +183,19 @@ export class OpenAqService {
         path,
         status,
         ...(retryAfter ? { retryAfter } : {}),
+      });
+    }
+    if (status === 408) {
+      // Live-probed: the measurements endpoints (raw and the hourly/daily
+      // rollups alike) answer 408 once the page offset gets deep — reproducibly
+      // at offset 4000 with limit=1000 — and return it again on every replay of
+      // the same offset. The cause is the offset, not load, so `retryable: false`
+      // opts out of `withRetry` rather than spending three attempts (~38s) on a
+      // request that cannot succeed as written.
+      throw timeoutError('OpenAQ timed out serving the request.', {
+        path,
+        status,
+        retryable: false,
       });
     }
     // 5xx (incl. the plain-text 500 on unvalidated coordinates) and any other
