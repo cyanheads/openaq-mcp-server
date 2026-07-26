@@ -9,6 +9,7 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { displayNumber } from '@/mcp-server/tools/shared/format-helpers.js';
 import { coordinatesSchema } from '@/mcp-server/tools/shared/geo-input.js';
 import { datetimePair, isNotFound } from '@/mcp-server/tools/shared/schema-helpers.js';
 import { upstreamFailure, withUpstream } from '@/mcp-server/tools/shared/upstream-errors.js';
@@ -358,7 +359,7 @@ export const getReadings = tool('openaq_get_readings', {
     const meta = `coords: ${loc.coordinates.latitude}, ${loc.coordinates.longitude} · timezone: ${loc.timezone ?? 'n/a'}`;
     const rows = result.readings.map(
       (r) =>
-        `- **${r.parameter.displayName ?? r.parameter.name}** (\`${r.parameter.name}\` #${r.parameter.id}): ${r.value} ${r.unit} · ${r.datetimeUtc} (local ${r.datetimeLocal}) · sensor ${r.sensorId}`,
+        `- **${r.parameter.displayName ?? r.parameter.name}** (\`${r.parameter.name}\` #${r.parameter.id}): ${displayNumber(r.value)} ${r.unit} · ${r.datetimeUtc} (local ${r.datetimeLocal}) · sensor ${r.sensorId}`,
     );
     return [{ type: 'text', text: [head, `${last}${dist}`, meta, '', ...rows].join('\n') }];
   },

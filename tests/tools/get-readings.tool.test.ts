@@ -334,4 +334,27 @@ describe('openaq_get_readings', () => {
     expect(text).toContain('3.4');
     expect(text).toContain('sensor 1701');
   });
+
+  it('rounds display values in content[] while the handler keeps upstream precision (#10)', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getLatest: async () => [
+        { ...seattleLatest[0]!, value: 0.019899999999999998 },
+        { ...seattleLatest[1]!, value: 2.0874999999999995 },
+      ],
+    });
+    const result = await getReadings.handler(
+      getReadings.input.parse({ locationId: 931 }),
+      ctxWith(),
+    );
+
+    // structuredContent keeps the exact upstream numbers.
+    expect(result.readings.map((r) => r.value)).toEqual([0.019899999999999998, 2.0874999999999995]);
+
+    const text = (getReadings.format!(result)[0] as { text: string }).text;
+    expect(text).toContain('0.0199');
+    expect(text).toContain('2.0875');
+    expect(text).not.toContain('0.019899999999999998');
+    expect(text).not.toContain('2.0874999999999995');
+  });
 });

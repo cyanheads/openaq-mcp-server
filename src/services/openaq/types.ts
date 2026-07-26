@@ -107,27 +107,36 @@ export interface OpenAqPeriod {
   label: string;
 }
 
-/** Per-bucket statistical summary on hourly/daily rollups. `sd` is null for single-reading buckets. */
+/**
+ * Per-bucket statistical summary on hourly/daily rollups. Every field is nullable:
+ * `sd` is null for a single-reading bucket, and a gap bucket (one the sensor never
+ * reported into) returns the whole block null alongside a null `value`.
+ */
 export interface OpenAqSummary {
-  avg?: number;
-  max?: number;
-  median?: number;
-  min?: number;
-  q02?: number;
-  q25?: number;
-  q75?: number;
-  q98?: number;
+  avg?: number | null;
+  max?: number | null;
+  median?: number | null;
+  min?: number | null;
+  q02?: number | null;
+  q25?: number | null;
+  q75?: number | null;
+  q98?: number | null;
   sd?: number | null;
 }
 
-/** A `/v3/sensors/{id}/measurements[/hourly|/daily]` row. Unit IS inline here (unlike /latest). */
+/**
+ * A `/v3/sensors/{id}/measurements[/hourly|/daily]` row. Unit IS inline here
+ * (unlike /latest). `value` is null for a gap bucket — a bucket the sensor
+ * reported nothing into. That is data, not a fault: the null is preserved rather
+ * than dropped or substituted, so the series keeps its shape on the time axis.
+ */
 export interface OpenAqMeasurement {
   coverage?: OpenAqCoverage;
   flagInfo?: { hasFlags?: boolean };
   parameter: OpenAqParameterRef;
   period: OpenAqPeriod;
   summary?: OpenAqSummary;
-  value: number;
+  value: number | null;
 }
 
 /** A `/v3/parameters` catalog row. */

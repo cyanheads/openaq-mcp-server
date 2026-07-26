@@ -82,10 +82,12 @@ Historical measurement series for one pollutant at one station over a date range
 
 ### DataCanvas spill workflow
 
-A multi-month `raw` series can be thousands of rows — too large to inline without blowing context, and a fixed slice would blind the agent to the rest. When a series exceeds the inline preview (100 rows), `openaq_get_measurements` stages the **full** set on a DuckDB-backed DataCanvas and returns:
+A multi-month `raw` series can be thousands of rows — too large to inline without blowing context, and a fixed slice would blind the agent to the rest. When a series exceeds the inline preview (100 rows), `openaq_get_measurements` stages the pulled rows on a DuckDB-backed DataCanvas and returns:
 
 - a preview (`series`, capped at 100 rows) plus `rowCount` and the `totalCount` enrichment,
 - `truncated: true`, `canvasId`, and a `tableName` of the form `measurements_<sensorId>`.
+
+The internal pager stops at **5000 rows**, so the canvas holds the whole series only when `totalCount` is at or below that. Above it — or when a page fails partway and the rows already pulled are kept — the response carries a `notice` saying so and how to reach the rest (shorter date windows, or `hourly`/`daily` aggregation).
 
 You then query the full set with the two consumer tools:
 
@@ -96,7 +98,7 @@ You then query the full set with the two consumer tools:
 
 Pass a prior `canvas_id` back into `openaq_get_measurements` to stage a **second** station's series on the same canvas (as `measurements_<otherSensorId>`), then `JOIN`/`UNION` the two in one query to compare stations.
 
-**Requires `CANVAS_PROVIDER_TYPE=duckdb`.** Without it, `openaq_get_measurements` still returns the truncated preview plus a notice (it does not fail), and the two dataframe tools return a `canvas_unavailable` error directing you to enable DuckDB.
+**Requires `CANVAS_PROVIDER_TYPE=duckdb`.** Without it, `openaq_get_measurements` still returns the truncated preview plus a notice (it does not fail), and the two dataframe tools return a `canvas_unavailable` error directing you to enable DuckDB. The same holds when the canvas is set to `duckdb` but cannot start — a missing DuckDB native in a `.mcpb` bundle, say: `openaq_get_measurements` returns the preview and names the staging failure in its `notice` rather than dropping a series it already fetched.
 
 **Not available in the `.mcpb` bundle.** The Claude Desktop bundle ships without DuckDB's platform-specific native binding — including it would lock the bundle to the OS it was packed on and push it far past the size registries accept. Leave `CANVAS_PROVIDER_TYPE` at `none` there; use the npm, `npx`, or Docker install for canvas work.
 

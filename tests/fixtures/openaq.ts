@@ -109,6 +109,60 @@ export const singleReadingHourly: OpenAqMeasurement = {
   flagInfo: { hasFlags: false },
 };
 
+/**
+ * A gap bucket — the sensor reported nothing into this hour, so `value` and every
+ * summary field come back null while coverage still reads 100%. Captured verbatim
+ * from sensor 3425 at 2024-01-03T18:00Z; the #11 repro.
+ */
+export const gapBucketHourly: OpenAqMeasurement = {
+  value: null,
+  parameter: { id: 2, name: 'pm25', units: 'µg/m³', displayName: null },
+  period: {
+    label: '1 hour',
+    interval: '01:00:00',
+    datetimeFrom: { utc: '2024-01-03T18:00:00Z', local: '2024-01-03T10:00:00-08:00' },
+    datetimeTo: { utc: '2024-01-03T19:00:00Z', local: '2024-01-03T11:00:00-08:00' },
+  },
+  summary: {
+    min: null,
+    q02: null,
+    q25: null,
+    median: null,
+    q75: null,
+    q98: null,
+    max: null,
+    avg: null,
+    sd: null,
+  },
+  coverage: { expectedCount: 1, observedCount: 1, percentComplete: 100 },
+  flagInfo: { hasFlags: false },
+};
+
+/**
+ * A daily bucket whose aggregates carry raw IEEE-754 artifacts, exactly as OpenAQ
+ * returns them for a ppm sensor — the #10 repro. `structuredContent` must keep
+ * these exact; only `content[]` rounds.
+ */
+export const impreciseDaily: OpenAqMeasurement = {
+  value: 0.0207,
+  parameter: { id: 10, name: 'o3', units: 'ppm', displayName: 'O₃' },
+  period: {
+    label: '1 day',
+    interval: '24:00:00',
+    datetimeFrom: { utc: '2026-07-01T07:00:00Z', local: '2026-07-01T00:00:00-07:00' },
+    datetimeTo: { utc: '2026-07-02T07:00:00Z', local: '2026-07-02T00:00:00-07:00' },
+  },
+  summary: {
+    min: 0.001,
+    median: 0.023,
+    max: 0.029,
+    avg: 0.02070833333333334,
+    sd: 0.0074977049628633,
+  },
+  coverage: { expectedCount: 24, observedCount: 24, percentComplete: 100 },
+  flagInfo: { hasFlags: false },
+};
+
 /** A raw measurement row — no summary block. */
 export const rawMeasurement: OpenAqMeasurement = {
   value: 6.3,
