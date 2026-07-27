@@ -10,6 +10,20 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
+/**
+ * Render one value as a Markdown table cell. Column names and values both come
+ * from arbitrary SQL projections, so an unescaped pipe opens a column the header
+ * never declared and an embedded newline ends the row mid-cell. Backslash is
+ * escaped first: doing it after the pipe would rewrite `a\|b` into a literal
+ * backslash followed by a live delimiter. `structuredContent.rows` keeps the raw
+ * value — this is the display twin only.
+ */
+const escapeCell = (value: unknown): string =>
+  String(value ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\|/g, '\\|')
+    .replace(/\r\n|[\r\n]/g, '<br>');
+
 export const dataframeQuery = tool('openaq_dataframe_query', {
   title: 'openaq-mcp-server: dataframe query',
   description:
@@ -77,13 +91,13 @@ export const dataframeQuery = tool('openaq_dataframe_query', {
       return [{ type: 'text', text: `Query returned 0 rows (rowCount: ${result.rowCount}).` }];
     }
     const columns = Object.keys(result.rows[0] as Record<string, unknown>);
-    const header = `| ${columns.join(' | ')} |`;
+    const header = `| ${columns.map(escapeCell).join(' | ')} |`;
     const divider = `| ${columns.map(() => '---').join(' | ')} |`;
     const body = result.rows
       .slice(0, 50)
       .map(
         (row) =>
-          `| ${columns.map((c) => String((row as Record<string, unknown>)[c] ?? '')).join(' | ')} |`,
+          `| ${columns.map((c) => escapeCell((row as Record<string, unknown>)[c])).join(' | ')} |`,
       )
       .join('\n');
     const note =

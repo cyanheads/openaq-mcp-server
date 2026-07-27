@@ -56,6 +56,49 @@ describe('openaq_dataframe_query', () => {
   });
 });
 
+/**
+ * Cell text comes from arbitrary SELECT projections, so the delimiters have to be
+ * neutralized in `content[]` while `structuredContent.rows` keeps the raw value.
+ * These assert on the rendered table shape, not on the escape function.
+ */
+describe('openaq_dataframe_query format() escapes Markdown table cells (#8)', () => {
+  const render = (rows: Record<string, unknown>[], rowCount = rows.length): string => {
+    const blocks = dataframeQuery.format?.({ rows, rowCount }) ?? [];
+    return blocks.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+  };
+
+  it('escapes a pipe so the row keeps its declared column count', () => {
+    const text = render([{ pipe_value: 'a|b', other: 'plain' }]);
+    const dataRow = text.split('\n')[2] as string;
+    expect(dataRow).toBe('| a\\|b | plain |');
+    expect(dataRow.split(/(?<!\\)\|/)).toHaveLength(4); // leading + 2 cells + trailing
+  });
+
+  it('collapses embedded newlines so a value cannot end the row early', () => {
+    const text = render([{ newline_value: 'line1\nline2' }]);
+    expect(text).toContain('| line1<br>line2 |');
+    expect(text.split('\n')).toHaveLength(5); // header, divider, 1 row, blank, note
+  });
+
+  it('normalizes CRLF and lone CR the same way as LF', () => {
+    expect(render([{ v: 'a\r\nb' }])).toContain('| a<br>b |');
+    expect(render([{ v: 'a\rb' }])).toContain('| a<br>b |');
+  });
+
+  it('escapes a backslash before the pipe so an escaped pipe is not re-armed', () => {
+    expect(render([{ v: 'a\\|b' }])).toContain('| a\\\\\\|b |');
+  });
+
+  it('escapes column names, which are projections too', () => {
+    const text = render([{ 'a|b': 1 }]);
+    expect(text.split('\n')[0]).toBe('| a\\|b |');
+  });
+
+  it('renders null and undefined as an empty cell', () => {
+    expect(render([{ a: null, b: undefined }]).split('\n')[2]).toBe('|  |  |');
+  });
+});
+
 describe('openaq_dataframe_describe', () => {
   it('throws canvas_unavailable when DuckDB is not enabled', async () => {
     setCanvas(undefined);
