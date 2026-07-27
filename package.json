@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/openaq-mcp-server",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "mcpName": "io.github.cyanheads/openaq-mcp-server",
   "description": "Find air-quality monitoring stations, read latest sensor values, and pull historical pollutant series via MCP. STDIO or Streamable HTTP.",
   "type": "module",

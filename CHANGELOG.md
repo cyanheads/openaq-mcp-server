@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-07-26
+
+openaq_dataframe_query escapes Markdown-breaking table cells, the location and parameters resources carry typed error contracts, and 422 validation messages resolve for all four OpenAQ body shapes
+
 ## [0.1.6](changelog/0.1.x/0.1.6.md) — 2026-07-26
 
 Six measurement-pipeline fixes: null gap-bucket values no longer fail output validation, mixed date/datetime ranges normalize correctly, a failed page or unavailable canvas preserves already-fetched rows, preview row counts are honest, and content text rounds display-only floating-point noise
