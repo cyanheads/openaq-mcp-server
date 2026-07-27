@@ -5,8 +5,10 @@
  *
  * Error classification (live-probed 2026-06-13):
  *  - 404 `{"detail":"Location not found"}` (clean JSON) → NotFound.
- *  - 422 `"[{'type':...,'msg':...}]"` — a JSON STRING wrapping a Python repr, NOT
- *    a JSON array. Regex-extract the `msg` value; surface as ValidationError.
+ *  - 422 in four body shapes: pydantic's `{"detail":[{...,"msg":...}]}`, a string
+ *    `{"detail":"..."}`, a bare JSON string, and `"[{'type':...,'msg':...}]"` — a
+ *    JSON STRING wrapping a Python repr, NOT a JSON array. All four surface as
+ *    ValidationError.
  *  - 500 `Internal Server Error` (plain text) for unvalidated bad input (e.g.
  *    coordinates=999,999). Defended at the Zod edge; backstop → transient
  *    ServiceUnavailable, never SerializationError.
@@ -99,10 +101,54 @@ function parseFound(found: number | string | undefined): number {
   return isLowerBound ? Number.POSITIVE_INFINITY : total;
 }
 
-/** Pull the first `'msg'` value out of OpenAQ's Python-repr 422 body. */
+const GENERIC_VALIDATION_MESSAGE = 'OpenAQ rejected the request parameters.';
+
+/** The first `'msg'` value in a Python repr of pydantic's error list. */
+const msgFromPythonRepr = (text: string): string | undefined =>
+  text.match(/'msg':\s*'([^']*)'/)?.[1];
+
+/**
+ * The message carried by a text body OpenAQ chose to serialize — the repr's `msg`
+ * when it wraps one, otherwise the text itself. Only for JSON strings: a body that
+ * is not JSON at all is not a message the API meant to send.
+ */
+const messageFromText = (text: string): string =>
+  msgFromPythonRepr(text) ?? (text.trim() || GENERIC_VALIDATION_MESSAGE);
+
+/**
+ * The upstream reason out of a 422 body. OpenAQ answers with four shapes and
+ * the parameter name and bound only survive if all four are read:
+ *  - a JSON object carrying pydantic's `detail[]` — the ordinary out-of-range case;
+ *  - a JSON object carrying a string `detail` — the flat form OpenAQ uses for 404s,
+ *    so a 422 arriving in it would otherwise drop to the generic message;
+ *  - a bare JSON string — a hand-written message (e.g. the datetime range check);
+ *  - a JSON string wrapping a Python repr of the same `detail` array, which only
+ *    the regex can read. It also arrives unquoted on some paths, so the regex runs
+ *    again when the body is not JSON at all.
+ */
 function extractValidationMessage(body: string): string {
-  const match = body.match(/'msg':\s*'([^']*)'/);
-  return match?.[1] ?? 'OpenAQ rejected the request parameters.';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return msgFromPythonRepr(body) ?? GENERIC_VALIDATION_MESSAGE;
+  }
+
+  if (typeof parsed === 'string') return messageFromText(parsed);
+
+  if (parsed !== null && typeof parsed === 'object') {
+    const { detail } = parsed as { detail?: unknown };
+    if (typeof detail === 'string') return messageFromText(detail);
+    if (Array.isArray(detail)) {
+      const msg = detail.find(
+        (entry): entry is { msg: string } =>
+          typeof (entry as { msg?: unknown } | null)?.msg === 'string',
+      )?.msg;
+      if (msg) return msg;
+    }
+  }
+
+  return GENERIC_VALIDATION_MESSAGE;
 }
 
 export class OpenAqService {

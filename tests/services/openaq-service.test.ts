@@ -73,8 +73,59 @@ describe('extractValidationMessage', () => {
       "[{'type': 'less_than_equal', 'loc': ('query', 'radius'), 'msg': 'Input should be less than or equal to 25000'}]";
     expect(extractValidationMessage(body)).toBe('Input should be less than or equal to 25000');
   });
+  it('pulls msg out of the Python repr when it arrives JSON-string-wrapped (#21 shape A)', () => {
+    const body = JSON.stringify(
+      "[{'type': 'int_parsing', 'loc': ('query', 'limit'), 'msg': 'Input should be a valid integer, unable to parse string as an integer'}]",
+    );
+    expect(extractValidationMessage(body)).toBe(
+      'Input should be a valid integer, unable to parse string as an integer',
+    );
+  });
+  it('returns a bare JSON string body verbatim (#21 shape B)', () => {
+    const body = JSON.stringify(
+      'Date/time from must be older than the date/time to. User passed 2026-06-25 00:00:00 - 2026-06-25 00:00:00',
+    );
+    expect(extractValidationMessage(body)).toBe(
+      'Date/time from must be older than the date/time to. User passed 2026-06-25 00:00:00 - 2026-06-25 00:00:00',
+    );
+  });
+  it('pulls the first msg out of a pydantic detail[] body (#21 shape C)', () => {
+    const body = JSON.stringify({
+      detail: [
+        {
+          type: 'less_than_equal',
+          loc: ['query', 'limit'],
+          msg: 'Input should be less than or equal to 1000',
+          input: '99999',
+          ctx: { le: 1000 },
+        },
+        { type: 'missing', loc: ['query', 'page'], msg: 'Field required' },
+      ],
+    });
+    expect(extractValidationMessage(body)).toBe('Input should be less than or equal to 1000');
+  });
+  it('returns a string detail verbatim — the flat shape OpenAQ uses for 404s', () => {
+    expect(extractValidationMessage(JSON.stringify({ detail: 'Sensor not found' }))).toBe(
+      'Sensor not found',
+    );
+  });
+  it('falls back when a string detail is blank', () => {
+    expect(extractValidationMessage(JSON.stringify({ detail: '   ' }))).toContain('rejected');
+  });
+  it('skips detail entries carrying no msg rather than returning undefined', () => {
+    const body = JSON.stringify({
+      detail: [{ type: 'value_error' }, { type: 'missing', msg: 'Field required' }],
+    });
+    expect(extractValidationMessage(body)).toBe('Field required');
+  });
   it('falls back when no msg present', () => {
     expect(extractValidationMessage('garbage')).toContain('rejected');
+  });
+  it('falls back for a JSON body with no readable detail', () => {
+    expect(extractValidationMessage(JSON.stringify({ detail: [] }))).toContain('rejected');
+    expect(extractValidationMessage(JSON.stringify({ error: 'nope' }))).toContain('rejected');
+    expect(extractValidationMessage('null')).toContain('rejected');
+    expect(extractValidationMessage('""')).toContain('rejected');
   });
 });
 
