@@ -17,6 +17,9 @@ export const locationResource = resource('openaq://location/{locationId}', {
   description:
     'Location metadata for a known OpenAQ location id: name, coordinates, country, provider, the sensors it carries (each with parameter + unit), and the datetimeFirst/datetimeLast data span. Mirror of openaq_find_locations output for a single station.',
   mimeType: 'application/json',
+  // Station metadata is near-static, but datetimeLast advances as measurements
+  // land — a few minutes of reuse, not the catalog's hour.
+  cacheHint: { ttlMs: 300_000, cacheScope: 'public' },
   params: z.object({
     locationId: z.string().describe('OpenAQ location id (numeric).'),
   }),

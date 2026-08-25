@@ -16,6 +16,9 @@ export const parametersResource = resource('openaq://parameters', {
   description:
     'Full catalog of measurable pollutants and their canonical units (id, code, display name, unit, description). Same data as openaq_list_parameters. The unit-disambiguation reference — the same pollutant appears under several ids with different units (CO is id 4 µg/m³, id 8 ppm, id 102 ppb).',
   mimeType: 'application/json',
+  // The pollutant catalog is public reference data that changes on the order of
+  // OpenAQ adding a parameter — an hour of client-side reuse costs nothing.
+  cacheHint: { ttlMs: 3_600_000, cacheScope: 'public' },
   params: z.object({}),
   errors: [
     {
