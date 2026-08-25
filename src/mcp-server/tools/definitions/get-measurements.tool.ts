@@ -361,6 +361,8 @@ export const getMeasurements = tool('openaq_get_measurements', {
     let found = 0;
     let exhausted = false;
     for (let page = 1; allRows.length < MAX_ROWS; page++) {
+      // Covers an abort that lands between pages, when no fetch is in flight.
+      ctx.signal.throwIfAborted();
       let result: MeasurementsPage;
       try {
         result = await withUpstream(ctx, () =>
@@ -377,6 +379,10 @@ export const getMeasurements = tool('openaq_get_measurements', {
           ),
         );
       } catch (err) {
+        // An abort almost always lands inside the fetch above rather than
+        // between pages, so it surfaces here as a rejection. Rethrow it before
+        // the degradation path recasts a cancellation as an OpenAQ outage.
+        ctx.signal.throwIfAborted();
         // Rows already pulled are good data. Losing them because a later page
         // failed serves nobody — keep them, and say what was lost and why.
         if (allRows.length === 0) throw err;
@@ -473,6 +479,9 @@ export const getMeasurements = tool('openaq_get_measurements', {
             rows: handle.rowCount,
           });
         } catch (err) {
+          // Staging aborts on the same signal; a cancelled request must not be
+          // reported to the operator as a DataCanvas failure.
+          ctx.signal.throwIfAborted();
           // A canvas_id the caller supplied and we cannot resolve is their input
           // to fix, so it stays an error with the contract's recovery hint.
           if (input.canvas_id !== undefined && isNotFound(err)) {

@@ -306,10 +306,68 @@ describe('openaq_get_measurements gap buckets (#11)', () => {
   });
 });
 
+describe('openaq_get_measurements cancellation', () => {
+  it('stops paging when the request is aborted instead of reporting a partial series', async () => {
+    const controller = new AbortController();
+    let pagesServed = 0;
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => {
+        pagesServed++;
+        controller.abort();
+        return fullPage(dailyMeasurement, 100_000);
+      },
+    });
+    const ctx = createMockContext({
+      errors: getMeasurements.errors,
+      signal: controller.signal,
+    });
+
+    await expect(
+      getMeasurements.handler(
+        getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation: 'daily' }),
+        ctx,
+      ),
+    ).rejects.toThrow();
+    // One page, then the abort — not the ceiling's worth, and no "series is partial" notice.
+    expect(pagesServed).toBe(1);
+  });
+
+  it('propagates an abort that interrupts an in-flight page fetch', async () => {
+    // The realistic shape: the signal fires while a page request is outstanding,
+    // so the abort reaches the handler as a rejection from inside the try — the
+    // one place a partial-series degradation could swallow it.
+    const controller = new AbortController();
+    let pagesServed = 0;
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => {
+        pagesServed++;
+        if (pagesServed === 1) return fullPage(dailyMeasurement, 100_000);
+        controller.abort(new Error('client went away'));
+        throw new Error('OpenAQ request failed.');
+      },
+    });
+    const ctx = createMockContext({
+      errors: getMeasurements.errors,
+      signal: controller.signal,
+    });
+
+    // Page 1 succeeded, so the degradation path is live — an abort must still win.
+    await expect(
+      getMeasurements.handler(
+        getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation: 'daily' }),
+        ctx,
+      ),
+    ).rejects.toThrow('client went away');
+    expect(pagesServed).toBe(2);
+  });
+});
+
 describe('openaq_get_measurements date-range normalization (#6)', () => {
   /** Installs a stub that records the range forwarded upstream. */
   const recordingStub = () => {
-    const seen: { datetimeFrom?: string; datetimeTo?: string } = {};
+    const seen: { datetimeFrom?: string | undefined; datetimeTo?: string | undefined } = {};
     installStubService({
       getLocation: async () => seattleLocation,
       getMeasurements: async (_sensorId, params) => {
