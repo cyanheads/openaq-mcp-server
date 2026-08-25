@@ -4,7 +4,11 @@
 # This stage installs all dependencies (including dev), builds the TypeScript
 # source code into JavaScript, and prepares the production assets.
 # ==============================================================================
-FROM oven/bun:1.4.0 AS build
+# Pinned to the *build* platform: this stage only runs tsc + tsc-alias, whose
+# output is plain architecture-independent JavaScript, so emulating it for a
+# foreign target buys nothing. Bun 1.4.0 also aborts under qemu, which makes a
+# cross-arch build of this stage fail outright rather than merely run slowly.
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.0 AS build
 
 WORKDIR /usr/src/app
 
