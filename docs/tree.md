@@ -1,10 +1,9 @@
 # openaq-mcp-server - Directory Structure
 
-Generated on: 2026-07-26 23:55:41
+Generated on: 2026-08-25 05:09:01
 
 ```text
 openaq-mcp-server/
-├── .claude/
 ├── .claude-plugin/
 │   └── plugin.json
 ├── .codex-plugin/
@@ -15,6 +14,8 @@ openaq-mcp-server/
 │   │   ├── bug_report.yml
 │   │   ├── config.yml
 │   │   └── feature_request.yml
+│   ├── CODE_OF_CONDUCT.md
+│   ├── CONTRIBUTING.md
 │   ├── FUNDING.yml
 │   └── SECURITY.md
 ├── .vscode/

@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-08-24 · ⚠️ Breaking
+
+mcp-ts-core ^0.11.0 → ^0.12.3 lands the MCP SDK v2 wire surface — protocol revision 2026-07-28, strict tool arguments, and 2020-12 schemas that declare the error envelope; a cancelled openaq_get_measurements now aborts instead of reporting a partial series.
+
 ## [0.1.7](changelog/0.1.x/0.1.7.md) — 2026-07-26
 
 openaq_dataframe_query escapes Markdown-breaking table cells, the location and parameters resources carry typed error contracts, and 422 validation messages resolve for all four OpenAQ body shapes
