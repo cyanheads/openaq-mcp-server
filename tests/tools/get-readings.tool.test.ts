@@ -27,6 +27,20 @@ import { installStubService } from '../fixtures/stub-service.js';
 
 const ctxWith = () => createMockContext({ errors: getReadings.errors });
 
+/**
+ * Await a handler call and return the McpError it rejects with. A definition's
+ * handler is typed `T | Promise<T>`, so the promise methods are not directly
+ * reachable on the call expression.
+ */
+async function rejection(run: unknown): Promise<McpError> {
+  try {
+    await run;
+  } catch (error) {
+    return error as McpError;
+  }
+  throw new Error('Expected the handler to reject.');
+}
+
 afterEach(() => setOpenAqService(undefined as never));
 
 describe('openaq_get_readings', () => {
@@ -135,9 +149,9 @@ describe('openaq_get_readings', () => {
 
   it('reserves missing_coordinates_parameter for coordinates without parametersId (#13)', async () => {
     installStubService({});
-    const err = await getReadings
-      .handler(getReadings.input.parse({ coordinates: '47.6,-122.3' }), ctxWith())
-      .catch((e: McpError) => e);
+    const err = await rejection(
+      getReadings.handler(getReadings.input.parse({ coordinates: '47.6,-122.3' }), ctxWith()),
+    );
     // The two guards must not share a reason — this one keeps the parametersId hint.
     expect(err.data).toMatchObject({ reason: 'missing_coordinates_parameter' });
     expect((err.data as { recovery: { hint: string } }).recovery.hint).toContain('parametersId');
@@ -168,9 +182,12 @@ describe('openaq_get_readings', () => {
 
   it('no_station_near_coordinates recovery no longer advises widening past the ceiling (#13)', async () => {
     installStubService({ findLocations: async () => ({ meta: { found: 0 }, results: [] }) });
-    const err = await getReadings
-      .handler(getReadings.input.parse({ coordinates: '0,-160', parametersId: 2 }), ctxWith())
-      .catch((e: McpError) => e);
+    const err = await rejection(
+      getReadings.handler(
+        getReadings.input.parse({ coordinates: '0,-160', parametersId: 2 }),
+        ctxWith(),
+      ),
+    );
 
     expect(err.data).toMatchObject({ reason: 'no_station_near_coordinates' });
     // The sweep already ran at the API's 25000m maximum, so "widen the radius" is a dead end.

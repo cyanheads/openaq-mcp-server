@@ -75,12 +75,15 @@ describe('openaq_find_locations', () => {
 
   it('throws no_locations_found (empty ≠ clean air) and the recovery names the modeled fallback', async () => {
     installStubService({ findLocations: async () => ({ meta: { found: 0 }, results: [] }) });
-    const err = await findLocations
-      .handler(findLocations.input.parse({ iso: 'AQ' }), ctxWith())
-      .catch((e) => e);
-    expect(err.code).toBe(JsonRpcErrorCode.NotFound);
-    expect(err.data.reason).toBe('no_locations_found');
-    expect(err.data.recovery.hint).toMatch(/open-meteo|clean air/i);
+    await expect(
+      findLocations.handler(findLocations.input.parse({ iso: 'AQ' }), ctxWith()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'no_locations_found',
+        recovery: { hint: expect.stringMatching(/open-meteo|clean air/i) },
+      },
+    });
   });
 
   it('discloses truncation when the result count hits the limit', async () => {

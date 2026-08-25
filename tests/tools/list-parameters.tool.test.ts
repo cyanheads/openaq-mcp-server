@@ -18,12 +18,14 @@ import { setOpenAqService } from '@/services/openaq/openaq-service.js';
 import { parameters } from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
 
+const ctxWith = () => createMockContext({ errors: listParameters.errors });
+
 afterEach(() => setOpenAqService(undefined as never));
 
 describe('openaq_list_parameters', () => {
   it('returns the full catalog with id, unit, and displayName (the headline goal)', async () => {
     installStubService({ listParameters: async () => parameters });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listParameters.handler(listParameters.input.parse({}), ctx);
 
     expect(result.parameters).toHaveLength(parameters.length);
@@ -35,7 +37,7 @@ describe('openaq_list_parameters', () => {
 
   it('filters locally by query (case-insensitive over code/displayName/description)', async () => {
     installStubService({ listParameters: async () => parameters });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listParameters.handler(
       listParameters.input.parse({ query: 'carbon monoxide' }),
       ctx,
@@ -46,7 +48,7 @@ describe('openaq_list_parameters', () => {
 
   it('pollutantsOnly excludes meteorological/auxiliary parameters', async () => {
     installStubService({ listParameters: async () => parameters });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listParameters.handler(
       listParameters.input.parse({ pollutantsOnly: true }),
       ctx,
@@ -59,7 +61,7 @@ describe('openaq_list_parameters', () => {
 
   it('emits a notice and empty array when the query matches nothing', async () => {
     installStubService({ listParameters: async () => parameters });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listParameters.handler(
       listParameters.input.parse({ query: 'zzznotapollutant' }),
       ctx,
@@ -89,8 +91,6 @@ describe('openaq_list_parameters', () => {
 });
 
 describe('openaq_list_parameters upstream error contract (#16)', () => {
-  const ctxWith = () => createMockContext({ errors: listParameters.errors });
-
   it('surfaces a 5xx as upstream_error with the declared recovery hint', async () => {
     installStubService({
       listParameters: async () => {

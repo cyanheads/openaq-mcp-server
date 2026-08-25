@@ -56,8 +56,7 @@ const contract = [
   },
 ] as const;
 
-const ctx = (): UpstreamFailContext =>
-  createMockContext({ errors: contract }) as unknown as UpstreamFailContext;
+const ctx = (): UpstreamFailContext => createMockContext({ errors: contract });
 
 describe('upstreamFailure', () => {
   it('maps ServiceUnavailable to upstream_error with the contract recovery on the wire', () => {

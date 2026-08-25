@@ -31,7 +31,7 @@ const okJson = (body: unknown): Response =>
 
 /** A non-OK response — the mock RETURNS it; the service must THROW on it. */
 const errorResponse = (status: number, body: string, headers?: Record<string, string>): Response =>
-  new Response(body, { status, headers });
+  new Response(body, headers ? { status, headers } : { status });
 
 function makeService(): OpenAqService {
   return new OpenAqService({} as never, {} as never);

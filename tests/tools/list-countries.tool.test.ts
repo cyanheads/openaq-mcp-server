@@ -23,12 +23,14 @@ import {
 } from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
 
+const ctxWith = () => createMockContext({ errors: listCountries.errors });
+
 afterEach(() => setOpenAqService(undefined as never));
 
 describe('openaq_list_countries', () => {
   it('returns countries with coverage span and measured parameters (the headline goal)', async () => {
     installStubService({ listCountries: async () => countries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(listCountries.input.parse({}), ctx);
 
     expect(result.countries).toHaveLength(2);
@@ -40,7 +42,7 @@ describe('openaq_list_countries', () => {
 
   it('answers "which countries measure NO2" style queries via local filter', async () => {
     installStubService({ listCountries: async () => countries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(listCountries.input.parse({ query: 'india' }), ctx);
     expect(result.countries).toHaveLength(1);
     expect(result.countries[0]?.code).toBe('IN');
@@ -48,7 +50,7 @@ describe('openaq_list_countries', () => {
 
   it('returns the exact ISO code match alone for a two-letter query (#4)', async () => {
     installStubService({ listCountries: async () => usSubstringCountries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(listCountries.input.parse({ query: 'US' }), ctx);
     expect(result.countries).toHaveLength(1);
     expect(result.countries[0]?.code).toBe('US');
@@ -57,7 +59,7 @@ describe('openaq_list_countries', () => {
 
   it('treats a lowercase two-letter query as an ISO code, not a substring (#4)', async () => {
     installStubService({ listCountries: async () => usSubstringCountries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(listCountries.input.parse({ query: 'us' }), ctx);
     // "us" is a substring of Cyprus/Australia, but the exact US code wins outright.
     expect(result.countries).toHaveLength(1);
@@ -66,14 +68,14 @@ describe('openaq_list_countries', () => {
 
   it('keeps a longer name fragment fuzzy across multiple matches (#4)', async () => {
     installStubService({ listCountries: async () => usSubstringCountries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(listCountries.input.parse({ query: 'united' }), ctx);
     expect(result.countries.map((c) => c.code).sort()).toEqual(['GB', 'US']);
   });
 
   it('emits a notice when the filter matches nothing', async () => {
     installStubService({ listCountries: async () => countries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(
       listCountries.input.parse({ query: 'atlantis' }),
       ctx,
@@ -84,7 +86,7 @@ describe('openaq_list_countries', () => {
 
   it('filters to countries measuring a parameter id (#18)', async () => {
     installStubService({ listCountries: async () => countries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     // id 8 (co ppm) is measured in the US fixture only; id 2 (pm25) in both.
     const result = await listCountries.handler(listCountries.input.parse({ parametersId: 8 }), ctx);
     expect(result.countries.map((c) => c.code)).toEqual(['US']);
@@ -93,7 +95,7 @@ describe('openaq_list_countries', () => {
 
   it('composes parametersId with query (#18)', async () => {
     installStubService({ listCountries: async () => countries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     // "d" is a substring of both "United States" and "India", so the query alone
     // keeps both; parametersId 8 (co ppm, US only) is what narrows to one.
     const result = await listCountries.handler(
@@ -105,7 +107,7 @@ describe('openaq_list_countries', () => {
 
   it('names the missed parameter id and the resolver in the notice (#18)', async () => {
     installStubService({ listCountries: async () => countries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(
       listCountries.input.parse({ parametersId: 99999 }),
       ctx,
@@ -118,7 +120,7 @@ describe('openaq_list_countries', () => {
 
   it('names both filters when a combined query + parametersId misses (#18)', async () => {
     installStubService({ listCountries: async () => countries });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     await listCountries.handler(
       listCountries.input.parse({ query: 'india', parametersId: 8 }),
       ctx,
@@ -130,14 +132,14 @@ describe('openaq_list_countries', () => {
 
   it('skips a country whose parameters is null instead of throwing (#18, #1)', async () => {
     installStubService({ listCountries: async () => countriesWithNullParameters });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(listCountries.input.parse({ parametersId: 2 }), ctx);
     expect(result.countries.map((c) => c.code).sort()).toEqual(['IN', 'US']);
   });
 
   it('returns a country with null parameters as empty array (regression #1)', async () => {
     installStubService({ listCountries: async () => countriesWithNullParameters });
-    const ctx = createMockContext();
+    const ctx = ctxWith();
     const result = await listCountries.handler(listCountries.input.parse({}), ctx);
     const sparse = result.countries.find((c) => c.code === 'XX');
     expect(sparse).toBeDefined();
@@ -191,8 +193,6 @@ describe('openaq_list_countries', () => {
 });
 
 describe('openaq_list_countries upstream error contract (#16)', () => {
-  const ctxWith = () => createMockContext({ errors: listCountries.errors });
-
   it('surfaces a 5xx as upstream_error with the declared recovery hint', async () => {
     installStubService({
       listCountries: async () => {
