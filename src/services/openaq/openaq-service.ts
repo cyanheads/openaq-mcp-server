@@ -255,6 +255,7 @@ export class OpenAqService {
       operation,
       maxRetries: 2,
       baseDelayMs: 1000,
+      context: ctx,
       signal: ctx.signal,
     });
   }
