@@ -27,101 +27,124 @@
 
 ---
 
-`openaq-mcp-server` wraps the [OpenAQ v3 API](https://docs.openaq.org/) to expose **measured** air quality — physical-sensor observations from government reference monitors and research-grade sensors worldwide. It is the ground-truth counterpart to a modeled air-quality grid: where a model gives a concentration anywhere, OpenAQ gives an actual reading from a physical monitor — sparser, unevenly distributed, but real.
+## Overview
 
-Coverage is uneven and honest. An empty result means there is no monitoring there, **not** that the air is clean — every discovery tool says so, and points to a modeled fallback ([`open-meteo-mcp-server`](https://github.com/cyanheads/open-meteo-mcp-server)'s air-quality tool) for anywhere-coverage.
+Measured air quality from the OpenAQ v3 API — physical-sensor observations from government reference monitors and research-grade sensors worldwide. Find monitoring stations, read current values, and pull historical pollutant series from any MCP client. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
 
-## Tools
-
-Five domain tools cover the workflow — discover stations, read current values, pull history, and resolve the two catalogs (pollutant units, country coverage) — plus two DataCanvas tools for SQL over historical series too large to inline. The data model is `location → sensor → parameter`; the server hides the sensor layer so you think in **stations and parameters**, never sensor ids.
+### Tools
 
 | Tool | Description |
 |:---|:---|
 | `openaq_find_locations` | Find monitoring stations near a point, in a bounding box, or by country. The required first step — readings and measurements key on the location id this returns. |
-| `openaq_get_readings` | Latest measured value for every sensor at a station, each joined with its pollutant and unit. The current-conditions tool. |
+| `openaq_get_readings` | Latest measured value for every sensor at a station, joined with its pollutant and unit. The current-conditions tool. |
 | `openaq_get_measurements` | Historical series for one pollutant at one station over a date range, with `raw`/`hourly`/`daily` aggregation. Large ranges spill to a DataCanvas. |
 | `openaq_list_parameters` | Catalog of measurable pollutants and their canonical units. The unit-disambiguation reference. |
-| `openaq_list_countries` | Catalog of country-level coverage — data span and parameters measured, filterable by `parametersId` to answer "which countries measure this pollutant?". An availability check before a regional sweep. |
+| `openaq_list_countries` | Catalog of country-level coverage — data span and parameters measured, filterable by `parametersId`. An availability check before a regional sweep. |
 | `openaq_dataframe_describe` | List the tables and columns staged on a DataCanvas so you can write valid SQL. |
 | `openaq_dataframe_query` | Run a read-only `SELECT` over staged measurement series. |
 
-### `openaq_find_locations`
+### Resources
 
-Find air-quality monitoring stations (measured by physical sensors, not modeled) and the parameters each one reports.
+| Resource | Description |
+|:---|:---|
+| `openaq://location/{locationId}` | Location metadata for a known location id — name, coordinates, country, provider, sensors (each with parameter + unit), and data span. |
+| `openaq://parameters` | Full pollutant + unit catalog (same data as `openaq_list_parameters`). |
+
+All resource data is also reachable via tools — both resources mirror tool output, so tool-only MCP clients lose nothing.
+
+## Capability reference
+
+### `openaq_find_locations` <sub>tool</sub>
 
 - Three search scopes — `coordinates` + `radius` (near-me), `bbox` (area sweep), or `iso` country code; at least one is required
 - `radius` is in metres, 1–25000 (the API hard-caps at 25000); larger areas need `bbox`, which returns no distance
-- `parametersId` narrows to stations that measure a given parameter (each returned station still lists all its sensors)
-- `limit` caps at 100 stations per page; `page` (1-based) reaches the rest — distance ordering applies within a page, not across pages, so paging is for `iso`/`bbox` sweeps rather than near-me searches
-- `coordinates` and `bbox` accept whitespace around the commas — `"47.6062, -122.3321"` is normalized to its space-free form
-- Returns each station's id, name, coordinates, distance (when searching by coordinates), country, provider, `isMonitor`/`isMobile`, the parameters its sensors measure with units, and the `datetimeFirst`/`datetimeLast` data span
-- Empty result means **no coverage, not clean air** — widen the radius, check `openaq_list_countries`, or fall back to the modeled `open-meteo` air-quality tool
+- `parametersId` narrows to stations that measure a given parameter; each returned station still lists all its sensors
+- `limit` caps at 100 stations per page; `page` (1-based) reaches further pages — distance ordering applies within a page, not across pages
+- Returns each station's id, name, coordinates, distance (coordinate search only), country, provider, `isMonitor`/`isMobile`, its parameters with units, and the `datetimeFirst`/`datetimeLast` data span
+- Empty result means no coverage, not clean air — widen the radius, check `openaq_list_countries`, or fall back to the modeled `open-meteo-mcp-server` air-quality tool
 
 ---
 
-### `openaq_get_readings`
+### `openaq_get_readings` <sub>tool</sub>
 
-Latest value per sensor at a station — the current-conditions tool.
-
-- Pass a `locationId` from `openaq_find_locations`, **or** `coordinates` + `parametersId` to auto-resolve the nearest station (within 25km) that measures that parameter
-- The raw OpenAQ latest feed is keyed only by sensor id; this tool **joins** it against the station's sensor → parameter → unit map, so every value carries its pollutant and unit
+- Pass a `locationId` from `openaq_find_locations`, or `coordinates` + `parametersId` to auto-resolve the nearest station (within 25km) that measures that parameter
+- Joins the latest feed (keyed only by sensor id) against the station's sensor → parameter → unit map, so every value carries its pollutant and unit
 - With `locationId`, `parametersId` optionally filters the returned values to one parameter; omit it for all sensors
-- Each value carries its UTC and local timestamp plus the station's `datetimeLast` — recency varies by station, so "latest" may be minutes or hours old
+- Each value carries its UTC and local timestamp plus the station's `datetimeLast` — recency varies by station
 
 ---
 
-### `openaq_get_measurements`
+### `openaq_get_measurements` <sub>tool</sub>
 
-Historical measurement series for one pollutant at one station over a date range — for trend analysis and "was last week worse than the monthly average?".
+- Pass a `locationId` and `parametersId`; the server resolves the underlying sensor internally (v3 series are sensor-scoped)
+- `aggregation`: `raw` (every reported value), `hourly`, or `daily` — rollups add a per-bucket min/median/max/mean/sd
+- `datetimeFrom`/`datetimeTo` accept a date (`YYYY-MM-DD`) or full UTC timestamp; omit either for the most recent values or "up to now"
+- Values carry their unit; the server never converts between µg/m³, ppm, and ppb
+- Internal paging caps at 5000 rows; past the 100-row inline preview, pulled rows stage on a DataCanvas (`canvasId` + `tableName`) when `CANVAS_PROVIDER_TYPE=duckdb` — without it, the response still returns the truncated preview plus a notice
+- Pass a prior `canvas_id` to stage a second station's series on the same canvas, for cross-station `JOIN`/`UNION` queries
 
-- Pass a `locationId` and a `parametersId` and work in stations — the server maps station + parameter to the underlying sensor (v3 series are sensor-scoped), so you get the series for that pollutant at that station
-- `aggregation`: `raw` (every reported value), `hourly`, or `daily` — `hourly`/`daily` add a per-bucket statistical summary (min, median, max, mean, sd)
-- `datetimeFrom`/`datetimeTo` accept a date (`YYYY-MM-DD`) or full UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`); omit for the most recent values
-- Values carry their unit; the server **never converts** between µg/m³, ppm, and ppb (the conversion is gas- and temperature-dependent)
-- **Large ranges spill to a DataCanvas** — see below
+---
 
-### DataCanvas spill workflow
+### `openaq_list_parameters` <sub>tool</sub>
 
-A multi-month `raw` series can be thousands of rows — too large to inline without blowing context, and a fixed slice would blind the agent to the rest. When a series exceeds the inline preview (100 rows), `openaq_get_measurements` stages the pulled rows on a DuckDB-backed DataCanvas and returns:
+- Optional `query` filters the ~44-parameter catalog by code, display name, or description (case-insensitive); `pollutantsOnly` excludes meteorological/particle-count channels (temperature, humidity, wind, pressure)
+- The unit-disambiguation reference — the same pollutant appears under multiple ids for different units (e.g. CO is id 4 in µg/m³, id 8 in ppm, id 102 in ppb)
+- Returns each parameter's id, code, display name, canonical unit, and a one-line description
 
-- a preview (`series`, capped at 100 rows) plus `rowCount` and the `totalCount` enrichment,
-- `truncated: true`, `canvasId`, and a `tableName` of the form `measurements_<sensorId>`.
+---
 
-The internal pager stops at **5000 rows**, so the canvas holds the whole series only when `totalCount` is at or below that. Above it — or when a page fails partway and the rows already pulled are kept — the response carries a `notice` saying so and how to reach the rest (shorter date windows, or `hourly`/`daily` aggregation).
+### `openaq_list_countries` <sub>tool</sub>
 
-You then query the full set with the two consumer tools:
+- Optional `query` matches a two-letter input as an exact ISO 3166-1 alpha-2 code, longer input as a substring of code or name; `parametersId` filters to countries measuring that parameter anywhere
+- Returns each country's id, ISO code, name, `datetimeFirst`/`datetimeLast` data span, and the parameters measured anywhere within it
+- The availability check before a regional `openaq_find_locations` sweep — answers "which countries have NO2 monitoring?"
+
+---
+
+### `openaq_dataframe_describe` <sub>tool</sub>
+
+- Takes a `canvas_id` from a prior `openaq_get_measurements` spill
+- Returns each staged `measurements_<sensorId>` table with its row count and column names
+- Throws `canvas_unavailable` when `CANVAS_PROVIDER_TYPE` is not `duckdb`
+
+---
+
+### `openaq_dataframe_query` <sub>tool</sub>
+
+- Takes a `canvas_id` and a read-only SQL `SELECT` against the staged measurement tables
+- Writes, DDL, and file/network table functions are rejected — only a single `SELECT` runs
+- Throws `canvas_unavailable` when DuckDB is off, or `missing_table` when the SQL references a table not staged on that canvas
+
+---
+
+### `openaq://location/{locationId}` <sub>resource</sub>
+
+- Returns name, locality, timezone, country, provider, `isMonitor`/`isMobile`, coordinates, sensors (each with parameter id/name/unit), and the `datetimeFirst`/`datetimeLast` span
+- `locationId` comes from `openaq_find_locations`
+- Cached 5 minutes — station metadata is near-static, but `datetimeLast` advances as measurements land
+
+---
+
+### `openaq://parameters` <sub>resource</sub>
+
+- Mirrors `openaq_list_parameters` with no query or filter — the full catalog
+- Cached 1 hour — the catalog changes only when OpenAQ adds a parameter
+
+## DataCanvas spill workflow
+
+A multi-month `raw` series can be thousands of rows — too large to inline without blowing context. When `openaq_get_measurements` spills, query the staged table with the two consumer tools:
 
 | Tool | Use |
 |:---|:---|
-| `openaq_dataframe_describe` | List staged tables and their columns (`value`, `datetimeFrom`, `datetimeTo`, `min`, `median`, `max`, `avg`, `sd`, `percentComplete`, `flagged`) — call this first to write SQL without guessing names. |
+| `openaq_dataframe_describe` | List staged tables and their columns (`value`, `datetimeFrom`, `datetimeTo`, `min`, `median`, `max`, `avg`, `sd`, `percentComplete`, `flagged`) — call first to write SQL without guessing names. |
 | `openaq_dataframe_query` | Run a read-only `SELECT` for monthly means, exceedance counts, percentiles, or cross-sensor comparisons. |
 
-Pass a prior `canvas_id` back into `openaq_get_measurements` to stage a **second** station's series on the same canvas (as `measurements_<otherSensorId>`), then `JOIN`/`UNION` the two in one query to compare stations.
-
-**Requires `CANVAS_PROVIDER_TYPE=duckdb`.** Without it, `openaq_get_measurements` still returns the truncated preview plus a notice (it does not fail), and the two dataframe tools return a `canvas_unavailable` error directing you to enable DuckDB. The same holds when the canvas is set to `duckdb` but cannot start — a missing DuckDB native in a `.mcpb` bundle, say: `openaq_get_measurements` returns the preview and names the staging failure in its `notice` rather than dropping a series it already fetched.
-
-**Not available in the `.mcpb` bundle.** The Claude Desktop bundle ships without DuckDB's platform-specific native binding — including it would lock the bundle to the OS it was packed on and push it far past the size registries accept. Leave `CANVAS_PROVIDER_TYPE` at `none` there; use the npm, `npx`, or Docker install for canvas work.
-
-`openaq_dataframe_query` is read-only by design — writes, DDL, and file/network table functions are rejected; only a single `SELECT` runs.
-
-## Resources and prompts
-
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `openaq://location/{locationId}` | Location metadata for a known location id — name, coordinates, country, provider, sensors (each with parameter + unit), and data span. |
-| Resource | `openaq://parameters` | Full pollutant + unit catalog (same data as `openaq_list_parameters`). |
-
-All resource data is also reachable via tools — both resources mirror tool output, so tool-only MCP clients lose nothing. There are no prompts: this is a data-lookup domain with no recurring analysis template that earns one (a WHO-guideline health snapshot is a cross-server workflow, not localized here).
+- Requires `CANVAS_PROVIDER_TYPE=duckdb`. Without it — or when a configured canvas fails to start — `openaq_get_measurements` still returns the truncated preview plus a notice rather than dropping data already fetched.
+- Not available in the `.mcpb` bundle — the Claude Desktop bundle ships without DuckDB's platform-specific native binding, since bundling it would lock the bundle to the OS it was packed on. Use the npm, `npx`, or Docker install for canvas work.
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
-
-- Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Typed error contracts per tool — each network tool declares `reason`/`code`/`when`/`recovery`, so failures carry a concrete next move
-- Pluggable auth (`none`, `jwt`, `oauth`) and structured, request-scoped logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports from one codebase
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
 OpenAQ-specific:
 
@@ -132,9 +155,9 @@ OpenAQ-specific:
 
 Agent-friendly output:
 
-- **Measured-vs-modeled framing in every discovery tool** — an empty result is stated as no coverage, not clean air, with a pointer to the modeled fallback, so an agent never misreads sparse data as a clean reading
-- **Units travel with every value, never converted** — the same pollutant has multiple parameter ids for different units (`co` is id 4 µg/m³, id 8 ppm, id 102 ppb), so `parametersId` is the precise selector and `openaq_list_parameters` maps pollutant + unit → id
-- **Chainable ids and staleness signals** — location id → readings/measurements, sensor id → history; `datetimeLast` and per-value timestamps expose how fresh "latest" actually is
+- Measured-vs-modeled framing in every discovery tool — an empty result is stated as no coverage, not clean air, with a pointer to the modeled fallback, so an agent never misreads sparse data as a clean reading
+- Units travel with every value, never converted — the same pollutant has multiple parameter ids for different units, so `parametersId` is the precise selector and `openaq_list_parameters` maps pollutant + unit → id
+- Chainable ids and staleness signals — location id → readings/measurements, sensor id → history; `datetimeLast` and per-value timestamps expose how fresh "latest" actually is
 - Capped lists disclose truncation (`totalCount`, `truncated`) via framework enrichment, reaching both the structured and text output surfaces
 
 ## Getting started
@@ -154,7 +177,7 @@ A public instance is available at `https://openaq.caseyjhand.com/mcp` — no ins
 }
 ```
 
-### Self-hosted
+### Self-Hosted / Local
 
 An OpenAQ v3 API key is required — sent as the `X-API-Key` header on every request. Get a free key from your [OpenAQ Explorer](https://explore.openaq.org/) account.
 
@@ -327,7 +350,7 @@ OpenAQ aggregates measurements from hundreds of government agencies, research in
 
 ## Contributing
 
-Issues and pull requests are welcome. Run checks and tests before submitting:
+Issues are welcome. Run checks and tests before submitting:
 
 ```sh
 bun run devcheck
