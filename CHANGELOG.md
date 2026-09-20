@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-09-20
+
+mcp-ts-core ^0.12.3 → ^0.13.6 — the canvas_id inputs advertise the minted-id pattern and reject a malformed id at argument validation, and an unset MCP_SESSION_MODE now resolves to stateless instead of stateful.
+
 ## [0.1.8](changelog/0.1.x/0.1.8.md) — 2026-08-24 · ⚠️ Breaking
 
 mcp-ts-core ^0.11.0 → ^0.12.3 lands the MCP SDK v2 wire surface — protocol revision 2026-07-28, strict tool arguments, and 2020-12 schemas that declare the error envelope; a cancelled openaq_get_measurements now aborts instead of reporting a partial series.
