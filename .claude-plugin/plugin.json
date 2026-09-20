@@ -1,4 +1,5 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "openaq-mcp-server",
   "version": "0.1.8",
   "description": "Find air-quality monitoring stations, read latest sensor values, and pull historical pollutant series via MCP. STDIO or Streamable HTTP.",
@@ -10,16 +11,23 @@
   "homepage": "https://github.com/cyanheads/openaq-mcp-server",
   "repository": "https://github.com/cyanheads/openaq-mcp-server",
   "license": "Apache-2.0",
+  "keywords": ["mcp", "mcp-server", "model-context-protocol", "openaq", "air-quality"],
+  "userConfig": {
+    "OPENAQ_API_KEY": {
+      "type": "string",
+      "title": "OpenAQ API key",
+      "description": "OpenAQ v3 API key, sent as the X-API-Key header on every request. Required — OpenAQ v3 rejects unauthenticated calls. Free from an OpenAQ Explorer account at explore.openaq.org.",
+      "sensitive": true,
+      "required": true
+    }
+  },
   "mcpServers": {
     "openaq-mcp-server": {
       "command": "npx",
-      "args": [
-        "-y",
-        "@cyanheads/openaq-mcp-server"
-      ],
+      "args": ["-y", "@cyanheads/openaq-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "OPENAQ_API_KEY": "${OPENAQ_API_KEY}"
+        "OPENAQ_API_KEY": "${user_config.OPENAQ_API_KEY}"
       }
     }
   }
