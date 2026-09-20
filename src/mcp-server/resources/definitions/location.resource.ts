@@ -47,6 +47,7 @@ export const locationResource = resource('openaq://location/{locationId}', {
       recovery:
         'Retry after a short backoff; if it keeps failing, OpenAQ is degraded rather than the id being wrong.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'rate_limited',
@@ -55,6 +56,7 @@ export const locationResource = resource('openaq://location/{locationId}', {
       recovery:
         'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; the free tier allows roughly 60 requests per minute.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_timeout',
@@ -63,6 +65,7 @@ export const locationResource = resource('openaq://location/{locationId}', {
       recovery:
         'Retry once after a short pause; a single-location read is small, so a timeout points at OpenAQ being slow.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_api_key',
@@ -71,6 +74,7 @@ export const locationResource = resource('openaq://location/{locationId}', {
       recovery:
         "Stop retrying — every OpenAQ read fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
       retryable: false,
+      thrownBy: 'service',
     },
   ],
   async handler(params, ctx) {

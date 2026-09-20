@@ -7,6 +7,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
@@ -30,9 +31,9 @@ export const dataframeQuery = tool('openaq_dataframe_query', {
     'Run a read-only SQL SELECT against the measurement tables openaq_get_measurements staged on a DataCanvas. Reference tables by the name the measurements call returned (measurements_<sensorId>). For aggregation (monthly means, exceedance counts) and cross-sensor comparison over series too large to inline. Only SELECT is allowed — writes, DDL, and file/network table functions are rejected.',
   annotations: { readOnlyHint: true },
   input: z.object({
-    canvas_id: z
-      .string()
-      .describe('DataCanvas id returned by openaq_get_measurements when a series spilled.'),
+    canvas_id: CanvasIdSchema.describe(
+      'DataCanvas id returned by openaq_get_measurements when a series spilled.',
+    ),
     sql: z
       .string()
       .describe(
@@ -61,6 +62,7 @@ export const dataframeQuery = tool('openaq_dataframe_query', {
       recovery:
         'Re-run openaq_get_measurements with a range large enough to spill, and use the canvas_id it returns.',
       retryable: false,
+      thrownBy: 'service',
     },
     {
       reason: 'missing_table',
@@ -69,6 +71,7 @@ export const dataframeQuery = tool('openaq_dataframe_query', {
       recovery:
         'Call openaq_dataframe_describe on this canvas_id to list the staged tables, then reference one of those names.',
       retryable: false,
+      thrownBy: 'service',
     },
   ],
 

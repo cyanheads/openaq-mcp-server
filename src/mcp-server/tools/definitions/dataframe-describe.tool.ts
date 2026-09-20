@@ -6,6 +6,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getCanvas } from '@/services/canvas-accessor.js';
 
@@ -15,9 +16,9 @@ export const dataframeDescribe = tool('openaq_dataframe_describe', {
     'List the tables and columns staged on a DataCanvas so you can write valid SQL for openaq_dataframe_query without guessing column names. Returns each measurement table (measurements_<sensorId>) with its row count and column names. Requires DataCanvas to be enabled.',
   annotations: { readOnlyHint: true },
   input: z.object({
-    canvas_id: z
-      .string()
-      .describe('DataCanvas id returned by openaq_get_measurements when a series spilled.'),
+    canvas_id: CanvasIdSchema.describe(
+      'DataCanvas id returned by openaq_get_measurements when a series spilled.',
+    ),
   }),
   output: z.object({
     tables: z
@@ -51,6 +52,7 @@ export const dataframeDescribe = tool('openaq_dataframe_describe', {
       recovery:
         'Re-run openaq_get_measurements with a range large enough to spill, and use the canvas_id it returns.',
       retryable: false,
+      thrownBy: 'service',
     },
   ],
 

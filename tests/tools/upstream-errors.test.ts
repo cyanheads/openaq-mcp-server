@@ -8,6 +8,7 @@
  */
 
 import {
+  type ErrorContract,
   JsonRpcErrorCode,
   type McpError,
   notFound,
@@ -19,6 +20,13 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { describe, expect, it } from 'vitest';
+import { locationResource } from '@/mcp-server/resources/definitions/location.resource.js';
+import { parametersResource } from '@/mcp-server/resources/definitions/parameters.resource.js';
+import { findLocations } from '@/mcp-server/tools/definitions/find-locations.tool.js';
+import { getMeasurements } from '@/mcp-server/tools/definitions/get-measurements.tool.js';
+import { getReadings } from '@/mcp-server/tools/definitions/get-readings.tool.js';
+import { listCountries } from '@/mcp-server/tools/definitions/list-countries.tool.js';
+import { listParameters } from '@/mcp-server/tools/definitions/list-parameters.tool.js';
 import {
   type UpstreamFailContext,
   upstreamFailure,
@@ -164,5 +172,58 @@ describe('withUpstream', () => {
         throw notFound('nope');
       }),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+  });
+});
+
+/**
+ * These four reasons are produced by `upstreamFailure` below the handler, so no
+ * literal `ctx.fail('<reason>'` names them in a definition file and
+ * `error-contract-unthrown` cannot see them as wired. `thrownBy: 'service'` is
+ * what tells the rule so. Two of these definitions hold no literal `ctx.fail` at
+ * all, which makes the linter blind to the whole file — this is the only guard
+ * that a future edit does not quietly drop the marker.
+ */
+describe('every definition routing through upstreamFailure marks those reasons service-thrown', () => {
+  /**
+   * Each definition infers its own `errors[]` as a literal tuple, so reading a
+   * shared field off one means viewing it as the contract type the builders take.
+   */
+  type Declaring = { readonly errors?: readonly ErrorContract[] };
+
+  const definitions: readonly (readonly [string, Declaring])[] = [
+    ['openaq_find_locations', findLocations],
+    ['openaq_get_readings', getReadings],
+    ['openaq_get_measurements', getMeasurements],
+    ['openaq_list_parameters', listParameters],
+    ['openaq_list_countries', listCountries],
+    ['openaq-location resource', locationResource],
+    ['openaq-parameters resource', parametersResource],
+  ];
+
+  const UPSTREAM_REASONS = [
+    'upstream_error',
+    'rate_limited',
+    'upstream_timeout',
+    'invalid_api_key',
+  ];
+
+  it.each(definitions)('%s declares all four upstream reasons', (_name, def) => {
+    const reasons = def.errors?.map((e) => e.reason) ?? [];
+    for (const reason of UPSTREAM_REASONS) expect(reasons).toContain(reason);
+  });
+
+  it.each(definitions)('%s marks each upstream reason thrownBy service', (_name, def) => {
+    for (const reason of UPSTREAM_REASONS) {
+      const entry = def.errors?.find((e) => e.reason === reason);
+      expect(entry, `${reason} is declared`).toBeDefined();
+      expect(entry?.thrownBy, `${reason} is marked service-thrown`).toBe('service');
+    }
+  });
+
+  it('leaves a handler-thrown reason unmarked, so the lint rule still checks it', () => {
+    const declaring: Declaring = findLocations;
+    const handlerThrown = declaring.errors?.find((e) => e.reason === 'no_search_scope');
+    expect(handlerThrown).toBeDefined();
+    expect(handlerThrown?.thrownBy).toBeUndefined();
   });
 });

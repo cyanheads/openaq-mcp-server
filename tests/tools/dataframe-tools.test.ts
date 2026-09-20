@@ -11,6 +11,7 @@ import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dataframeDescribe } from '@/mcp-server/tools/definitions/dataframe-describe.tool.js';
 import { dataframeQuery } from '@/mcp-server/tools/definitions/dataframe-query.tool.js';
+import { getMeasurements } from '@/mcp-server/tools/definitions/get-measurements.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 
 afterEach(() => {
@@ -162,10 +163,13 @@ describe('canvas failure modes are declared, not just thrown (#16)', () => {
       }),
     }) as unknown as DataCanvas;
 
+  /** Well-formed against CanvasIdSchema, but no longer resolvable — an expired canvas. */
+  const EXPIRED_CANVAS_ID = 'goneCanvs1';
+
   const canvasNotFound = () =>
     notFound('Canvas not found or expired.', {
       reason: 'canvas_not_found',
-      canvasId: 'gone',
+      canvasId: EXPIRED_CANVAS_ID,
       recovery: { hint: 'Re-run the tool that produced this canvas_id to stage fresh data.' },
     });
 
@@ -176,7 +180,7 @@ describe('canvas failure modes are declared, not just thrown (#16)', () => {
     setCanvas(throwingCanvas(canvasNotFound()));
     await expect(
       dataframeDescribe.handler(
-        dataframeDescribe.input.parse({ canvas_id: 'gone' }),
+        dataframeDescribe.input.parse({ canvas_id: EXPIRED_CANVAS_ID }),
         createMockContext({ errors: dataframeDescribe.errors }),
       ),
     ).rejects.toMatchObject({
@@ -192,7 +196,7 @@ describe('canvas failure modes are declared, not just thrown (#16)', () => {
     setCanvas(throwingCanvas(canvasNotFound()));
     await expect(
       dataframeQuery.handler(
-        dataframeQuery.input.parse({ canvas_id: 'gone', sql: 'SELECT 1' }),
+        dataframeQuery.input.parse({ canvas_id: EXPIRED_CANVAS_ID, sql: 'SELECT 1' }),
         createMockContext({ errors: dataframeQuery.errors }),
       ),
     ).rejects.toMatchObject({
@@ -228,5 +232,56 @@ describe('canvas failure modes are declared, not just thrown (#16)', () => {
       code: JsonRpcErrorCode.NotFound,
       data: { reason: 'missing_table', tableName: 'measurements_9' },
     });
+  });
+});
+
+/**
+ * `canvas_id` inputs carry the framework's minted-id shape, so a value that could
+ * never name a real canvas is rejected at argument validation rather than spending
+ * a registry lookup and coming back as an expired canvas. These assert the
+ * constraint reaches the advertised `inputSchema`, not just the handler.
+ */
+describe('canvas_id inputs reject a malformed id at argument validation', () => {
+  const MALFORMED = ['gone', '', 'way-too-long-to-be-minted', 'bad id 123', 'abc/123456'];
+  const WELL_FORMED = 'abc1234567';
+
+  it.each(MALFORMED)('openaq_dataframe_query rejects %o', (canvas_id) => {
+    expect(dataframeQuery.input.safeParse({ canvas_id, sql: 'SELECT 1' }).success).toBe(false);
+  });
+
+  it.each(MALFORMED)('openaq_dataframe_describe rejects %o', (canvas_id) => {
+    expect(dataframeDescribe.input.safeParse({ canvas_id }).success).toBe(false);
+  });
+
+  it.each(MALFORMED)(
+    'openaq_get_measurements rejects %o for its optional canvas_id',
+    (canvas_id) => {
+      expect(
+        getMeasurements.input.safeParse({ locationId: 1, parametersId: 2, canvas_id }).success,
+      ).toBe(false);
+    },
+  );
+
+  it('accepts a well-formed minted id on every tool that takes one', () => {
+    expect(
+      dataframeQuery.input.safeParse({ canvas_id: WELL_FORMED, sql: 'SELECT 1' }).success,
+    ).toBe(true);
+    expect(dataframeDescribe.input.safeParse({ canvas_id: WELL_FORMED }).success).toBe(true);
+    expect(
+      getMeasurements.input.safeParse({ locationId: 1, parametersId: 2, canvas_id: WELL_FORMED })
+        .success,
+    ).toBe(true);
+  });
+
+  it('leaves openaq_get_measurements canvas_id optional', () => {
+    expect(getMeasurements.input.safeParse({ locationId: 1, parametersId: 2 }).success).toBe(true);
+  });
+
+  it('names the offending field so a caller can fix the call', () => {
+    const parsed = dataframeQuery.input.safeParse({ canvas_id: 'gone', sql: 'SELECT 1' });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues[0]?.path).toEqual(['canvas_id']);
+    }
   });
 });

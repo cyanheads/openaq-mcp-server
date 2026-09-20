@@ -8,6 +8,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { displayNumber } from '@/mcp-server/tools/shared/format-helpers.js';
 import { isNotFound } from '@/mcp-server/tools/shared/schema-helpers.js';
@@ -135,12 +136,9 @@ export const getMeasurements = tool('openaq_get_measurements', {
       .describe(
         'Max rows per page from the API (1–1000). Default 1000. The tool pages internally up to the spill threshold.',
       ),
-    canvas_id: z
-      .string()
-      .optional()
-      .describe(
-        "DataCanvas id from a prior call to reuse the same canvas (e.g. to compare two stations' series side by side). Omit to start fresh; the response returns a new canvas_id when the series spills.",
-      ),
+    canvas_id: CanvasIdSchema.optional().describe(
+      "DataCanvas id from a prior openaq_get_measurements call, to reuse the same canvas (e.g. to compare two stations' series side by side). Omit to start fresh; the response returns a new canvas_id when the series spills.",
+    ),
   }),
   output: z.object({
     location: z
@@ -277,6 +275,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
       recovery:
         'Retry after a short backoff; if it keeps failing, OpenAQ is degraded and the series is briefly unavailable.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'rate_limited',
@@ -285,6 +284,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
       recovery:
         'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; long raw ranges page internally and spend several requests, so prefer daily aggregation.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_timeout',
@@ -293,6 +293,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
       recovery:
         'Retry once after a short pause, then narrow the date range or switch aggregation to daily so each page is smaller.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_api_key',
@@ -301,6 +302,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
       recovery:
         "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
       retryable: false,
+      thrownBy: 'service',
     },
   ],
 

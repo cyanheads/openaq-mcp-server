@@ -222,6 +222,7 @@ export const findLocations = tool('openaq_find_locations', {
       recovery:
         'Retry after a short backoff; if it keeps failing, OpenAQ is degraded — an error here says nothing about station coverage.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'rate_limited',
@@ -230,6 +231,7 @@ export const findLocations = tool('openaq_find_locations', {
       recovery:
         'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; the free tier allows roughly 60 requests per minute.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_timeout',
@@ -238,6 +240,7 @@ export const findLocations = tool('openaq_find_locations', {
       recovery:
         'Retry once after a short pause, or narrow the search area with a smaller radius or a tighter bbox.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_api_key',
@@ -246,6 +249,7 @@ export const findLocations = tool('openaq_find_locations', {
       recovery:
         "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
       retryable: false,
+      thrownBy: 'service',
     },
   ],
 

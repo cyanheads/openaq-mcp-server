@@ -92,6 +92,7 @@ export const listParameters = tool('openaq_list_parameters', {
       recovery:
         'Retry after a short backoff; if it keeps failing, OpenAQ is degraded and the catalog is briefly unavailable.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'rate_limited',
@@ -100,6 +101,7 @@ export const listParameters = tool('openaq_list_parameters', {
       recovery:
         'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; the free tier allows roughly 60 requests per minute.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_timeout',
@@ -108,6 +110,7 @@ export const listParameters = tool('openaq_list_parameters', {
       recovery:
         'Retry once after a short pause; the parameter catalog is small, so a timeout points at OpenAQ being slow rather than the query.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_api_key',
@@ -116,6 +119,7 @@ export const listParameters = tool('openaq_list_parameters', {
       recovery:
         "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
       retryable: false,
+      thrownBy: 'service',
     },
   ],
 

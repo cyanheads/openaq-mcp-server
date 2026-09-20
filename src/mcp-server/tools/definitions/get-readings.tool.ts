@@ -174,6 +174,7 @@ export const getReadings = tool('openaq_get_readings', {
       recovery:
         'Retry after a short backoff; if it keeps failing, OpenAQ is degraded and current conditions are briefly unavailable.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'rate_limited',
@@ -182,6 +183,7 @@ export const getReadings = tool('openaq_get_readings', {
       recovery:
         'Wait the retryAfter seconds given in data (about 60 if absent) before retrying; the free tier allows roughly 60 requests per minute.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'upstream_timeout',
@@ -190,6 +192,7 @@ export const getReadings = tool('openaq_get_readings', {
       recovery:
         'Retry once after a short pause; passing a known locationId skips the nearest-station sweep and costs one fewer request.',
       retryable: true,
+      thrownBy: 'service',
     },
     {
       reason: 'invalid_api_key',
@@ -198,6 +201,7 @@ export const getReadings = tool('openaq_get_readings', {
       recovery:
         "Stop retrying — every OpenAQ call fails until the server's OPENAQ_API_KEY is replaced with a valid key from an OpenAQ Explorer account.",
       retryable: false,
+      thrownBy: 'service',
     },
   ],
 
