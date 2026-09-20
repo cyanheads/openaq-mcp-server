@@ -22,6 +22,7 @@ import { initOpenAqService } from './services/openaq/openaq-service.js';
 await createApp({
   name: 'openaq-mcp-server',
   title: 'openaq-mcp-server',
+  sessionMode: 'stateless',
   tools: [
     findLocations,
     getReadings,
