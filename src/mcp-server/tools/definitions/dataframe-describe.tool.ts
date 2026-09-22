@@ -17,7 +17,7 @@ export const dataframeDescribe = tool('openaq_dataframe_describe', {
   annotations: { readOnlyHint: true },
   input: z.object({
     canvas_id: CanvasIdSchema.describe(
-      'DataCanvas id returned by openaq_get_measurements when a series spilled.',
+      'DataCanvas id returned by openaq_get_measurements — minted when a series overflowed the inline preview, or the canvas_id you passed it.',
     ),
   }),
   output: z.object({
@@ -50,7 +50,7 @@ export const dataframeDescribe = tool('openaq_dataframe_describe', {
       code: JsonRpcErrorCode.NotFound,
       when: 'The canvas_id is unknown or its canvas has expired.',
       recovery:
-        'Re-run openaq_get_measurements with a range large enough to spill, and use the canvas_id it returns.',
+        'Re-run openaq_get_measurements without a canvas_id (or with a live one) and use the canvasId it returns — any range, since a supplied canvas_id stages the series whatever its size.',
       retryable: false,
       thrownBy: 'service',
     },
@@ -65,7 +65,7 @@ export const dataframeDescribe = tool('openaq_dataframe_describe', {
     const tables = await instance.describe();
     if (tables.length === 0) {
       ctx.enrich.notice(
-        'No tables staged on this canvas yet. Run openaq_get_measurements with a large range to stage a series.',
+        'No tables staged on this canvas yet. Run openaq_get_measurements with this canvas_id to stage a series on it.',
       );
     }
     ctx.log.info('Canvas described', { canvasId: instance.canvasId, tableCount: tables.length });
