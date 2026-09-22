@@ -58,6 +58,142 @@ describe('openaq_dataframe_query', () => {
 });
 
 /**
+ * The canvas row limit defaults to 10,000 — a DuckDB ceiling, not a response
+ * budget — so the tool passes its own cap and reports when the cap bit. These
+ * drive a fake `query` that honours the `rowLimit` it is handed, exactly as the
+ * DuckDB provider does (`rowCount === rowLimit` and `truncated: true` when more
+ * rows exist, `truncated` absent otherwise).
+ */
+describe('openaq_dataframe_query response cap (#25)', () => {
+  /** A fake `query` that produces `available` rows, capped at the passed `rowLimit`. */
+  const cappingQuery = (available: number) =>
+    vi.fn(async (_sql: string, options?: { rowLimit?: number }) => {
+      const rowLimit = options?.rowLimit ?? 10_000;
+      const returned = Math.min(available, rowLimit);
+      return {
+        columns: ['value'],
+        rows: Array.from({ length: returned }, (_, i) => ({ value: i })),
+        rowCount: returned,
+        ...(available > rowLimit ? { truncated: true as const } : {}),
+      };
+    });
+
+  const runQuery = async (query: ReturnType<typeof cappingQuery>) => {
+    setCanvas({
+      acquire: vi.fn(async () => ({ canvasId: 'abc1234567', query })),
+    } as unknown as DataCanvas);
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    const result = await dataframeQuery.handler(
+      dataframeQuery.input.parse({
+        canvas_id: 'abc1234567',
+        sql: 'SELECT value FROM measurements_1701',
+      }),
+      ctx,
+    );
+    return { ctx, result };
+  };
+
+  const formatText = (result: Parameters<NonNullable<typeof dataframeQuery.format>>[0]): string =>
+    (dataframeQuery.format?.(result) ?? [])
+      .map((b) => (b.type === 'text' ? b.text : ''))
+      .join('\n');
+
+  it('forwards a 200-row cap to the canvas and bounds the response at it', async () => {
+    const query = cappingQuery(966_289);
+    const { result } = await runQuery(query);
+
+    expect(query).toHaveBeenCalledWith(
+      'SELECT value FROM measurements_1701',
+      expect.objectContaining({ rowLimit: 200 }),
+    );
+    expect(result.rows).toHaveLength(200);
+    expect(result.rowCount).toBe(200);
+    expect(result.truncated).toBe(true);
+  });
+
+  it('names ORDER BY … LIMIT … OFFSET as the continuation when the cap bit', async () => {
+    const { ctx } = await runQuery(cappingQuery(1966));
+    const notice = getEnrichment(ctx).notice as string;
+
+    expect(notice).toContain('ORDER BY <column> LIMIT 200 OFFSET <n>');
+    expect(notice).toContain('200-row cap');
+  });
+
+  it('leaves truncated absent and reports the exact count when the result fits', async () => {
+    const { ctx, result } = await runQuery(cappingQuery(42));
+
+    expect(result.truncated).toBeUndefined();
+    expect(result.rowCount).toBe(42);
+    expect(result.rowCount).toBe(result.rows.length);
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('treats a result of exactly the cap as complete — no truncation, no notice', async () => {
+    const { ctx, result } = await runQuery(cappingQuery(200));
+
+    expect(result.rows).toHaveLength(200);
+    expect(result.rowCount).toBe(200);
+    expect(result.truncated).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('flags one row past the cap as truncated', async () => {
+    const { ctx, result } = await runQuery(cappingQuery(201));
+
+    expect(result.rows).toHaveLength(200);
+    expect(result.truncated).toBe(true);
+    expect(getEnrichment(ctx).notice).toBeDefined();
+  });
+
+  it('returns an empty result without a truncation flag or a notice', async () => {
+    const { ctx, result } = await runQuery(cappingQuery(0));
+
+    expect(result.rows).toEqual([]);
+    expect(result.rowCount).toBe(0);
+    expect(result.truncated).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+    expect(formatText(result)).toContain('0 rows');
+  });
+
+  it('never carries truncated without a notice, or a notice without truncated', async () => {
+    for (const available of [0, 1, 199, 200, 201, 5000]) {
+      const { ctx, result } = await runQuery(cappingQuery(available));
+      expect(result.truncated === true).toBe(getEnrichment(ctx).notice !== undefined);
+    }
+  });
+
+  it('returns an offset past the end as an empty page, not an error', async () => {
+    const query = vi.fn(async () => ({ columns: ['value'], rows: [], rowCount: 0 }));
+    setCanvas({
+      acquire: vi.fn(async () => ({ canvasId: 'abc1234567', query })),
+    } as unknown as DataCanvas);
+    const ctx = createMockContext({ errors: dataframeQuery.errors });
+    const result = await dataframeQuery.handler(
+      dataframeQuery.input.parse({
+        canvas_id: 'abc1234567',
+        sql: 'SELECT value FROM measurements_1701 ORDER BY value LIMIT 200 OFFSET 999999',
+      }),
+      ctx,
+    );
+
+    expect(result.rows).toEqual([]);
+    expect(result.truncated).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('renders every returned row in content[] and states the truncation there too (#24)', async () => {
+    const { result } = await runQuery(cappingQuery(1966));
+    const text = formatText(result);
+    const rendered = text.split('\n').filter((l) => l.startsWith('| ') && !l.includes('---'));
+
+    // header + 200 body rows, and no "Showing 50 of N" slice.
+    expect(rendered).toHaveLength(201);
+    expect(text).not.toContain('Showing 50');
+    expect(text).toMatch(/truncated/i);
+  });
+});
+
+/**
  * Cell text comes from arbitrary SELECT projections, so the delimiters have to be
  * neutralized in `content[]` while `structuredContent.rows` keeps the raw value.
  * These assert on the rendered table shape, not on the escape function.
