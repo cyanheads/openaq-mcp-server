@@ -1,9 +1,15 @@
 /**
  * @fileoverview openaq_get_measurements — historical measurement series for one
  * pollutant at one station over a date range. Resolves the station's sensor for
- * the parameter internally (v3 series are sensor-scoped). Large ranges spill to a
- * DataCanvas: the response carries a preview plus a canvasId + table name queryable
- * with openaq_dataframe_query. Values carry their unit; units are never converted.
+ * the parameter internally (v3 series are sensor-scoped). The pulled rows stage on
+ * a DataCanvas whenever the series overflows the inline preview or the caller
+ * supplied a canvas_id: the response then carries a canvasId + table name to read
+ * with openaq_dataframe_describe, then openaq_dataframe_query. One table per
+ * sensor, so re-staging the same sensor on a canvas overwrites its earlier series.
+ * The pull is bounded at MAX_ROWS and can also stop on a failed page, so
+ * pulledCount / pullComplete report what was actually collected and totalCount is
+ * a floor whenever OpenAQ answered with a ">N" lower bound. Values carry their
+ * unit; units are never converted.
  * @module mcp-server/tools/definitions/get-measurements.tool
  */
 
@@ -22,8 +28,6 @@ const MAX_ROWS = 5000;
 const PAGE_LIMIT = 1000;
 /** Inline preview budget in rows (the JSON char budget for canvas spill is separate). */
 const PREVIEW_ROWS = 100;
-/** Rows rendered as text in `content[]`. The rest of the preview stays in `structuredContent`. */
-const DISPLAY_ROWS = 20;
 
 const dateRegex = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$/;
 const dateOnlyRegex = /^\d{4}-\d{2}-\d{2}$/;
@@ -97,7 +101,7 @@ function toOutputRow(r: SeriesRow, aggregation: 'raw' | 'hourly' | 'daily') {
 export const getMeasurements = tool('openaq_get_measurements', {
   title: 'openaq-mcp-server: get measurements',
   description:
-    'Historical measurement series for one pollutant at one station over a date range — for trend analysis and "was last week worse than the monthly average?". Pass a locationId and a parametersId and work in stations — you get the series for that pollutant at that station. Choose aggregation: raw (every reported value), hourly, or daily — daily and hourly add a per-bucket statistical summary (min, median, max, mean, sd). Large ranges produce thousands of rows and spill to a DataCanvas: the response returns a preview plus a canvasId and table name you query with openaq_dataframe_query. Values carry their unit; the server never converts between µg/m³, ppm, and ppb.',
+    'Historical measurement series for one pollutant at one station over a date range — for trend analysis and "was last week worse than the monthly average?". Pass a locationId and a parametersId and work in stations — you get the series for that pollutant at that station. Choose aggregation: raw (every reported value), hourly, or daily — daily and hourly add a per-bucket statistical summary (min, median, max, mean, sd). Large ranges produce thousands of rows and stage on a DataCanvas: the response returns a preview plus a canvasId and table name — call openaq_dataframe_describe on the canvasId for the table\'s columns, then openaq_dataframe_query to run SQL over it. Passing a canvas_id stages the series there whatever its size, so two stations land on one canvas for a side-by-side comparison. Values carry their unit; the server never converts between µg/m³, ppm, and ppb.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     locationId: z.number().int().describe('Station id from openaq_find_locations.'),
@@ -134,10 +138,10 @@ export const getMeasurements = tool('openaq_get_measurements', {
       .max(1000)
       .default(1000)
       .describe(
-        'Max rows per page from the API (1–1000). Default 1000. The tool pages internally up to the spill threshold.',
+        `Max rows per page from the API (1–1000). Default 1000. The tool pages internally up to the ${MAX_ROWS}-row pull ceiling.`,
       ),
     canvas_id: CanvasIdSchema.optional().describe(
-      "DataCanvas id from a prior openaq_get_measurements call, to reuse the same canvas (e.g. to compare two stations' series side by side). Omit to start fresh; the response returns a new canvas_id when the series spills.",
+      "DataCanvas id from a prior openaq_get_measurements call, to put this series on the same canvas (e.g. to compare two stations' series side by side). Supplying it stages the series whatever its size. Reuse stages one table per sensor, so a second sensor adds a table while the same sensor overwrites its earlier series — the response says so when that happens. Omit to start fresh; the response returns a new canvas_id when the series overflows the inline preview.",
     ),
   }),
   output: z.object({
@@ -197,35 +201,55 @@ export const getMeasurements = tool('openaq_get_measurements', {
           .describe('One bucket in the series, with its value and (for rollups) statistics'),
       )
       .describe(
-        'The (possibly previewed) series, newest or oldest first per the API. When truncated, this is a preview — query canvasId for the rows staged there.',
+        'The (possibly previewed) series, newest or oldest first per the API. Every row here is also rendered in the text output. When truncated, this is a preview of pulledCount rows — query canvasId for the rest.',
       ),
     rowCount: z.number().describe('Rows in this response (preview length when spilled)'),
+    pulledCount: z
+      .number()
+      .describe(
+        "Rows pulled from OpenAQ — the canvas table's row count when canvasId is present. Equals rowCount when the whole series fit inline; larger when series is a preview.",
+      ),
+    pullComplete: z
+      .boolean()
+      .describe(
+        `True when the pager reached the end of the requested range, so pulledCount is the whole series for it. False when the ${MAX_ROWS}-row cap or a failed page stopped the pull early — the rows past that point are in neither this response nor the canvas table, and the notice says how to reach them.`,
+      ),
     canvasId: z
       .string()
       .optional()
       .describe(
-        `DataCanvas id holding the pulled series. Query with openaq_dataframe_query. The pull stops at ${MAX_ROWS} rows, so this is the whole series only when totalCount is at or below that — read the notice, which says so when the cap or a failed page cut the pull short.`,
+        "DataCanvas id holding the staged series — pulledCount rows of it. Call openaq_dataframe_describe on this id for the table's columns, then openaq_dataframe_query to run SQL. Present whenever staging succeeded, which includes a series that fit inline on a canvas_id you supplied.",
       ),
     tableName: z
       .string()
       .optional()
       .describe(
-        'Canvas table name for the staged series (e.g. "measurements_1701"). Reference it in SQL.',
+        'Canvas table holding the staged series (e.g. "measurements_1701"). openaq_dataframe_describe lists its columns; reference this name in openaq_dataframe_query SQL. One table per sensor, so re-staging the same sensor on this canvas overwrites it.',
       ),
     truncated: z
       .boolean()
       .optional()
       .describe(
-        'True when the series exceeded the inline limit, so series is a preview and the pulled rows were staged on canvasId. Absent/false when everything fit inline. It says nothing about whether the pull itself was complete — compare rowCount and totalCount, and read the notice.',
+        'True when the series exceeded the inline limit, so series is a preview of the pulled rows. Absent/false when every pulled row is inline. It describes the preview only — canvasId reports whether the rows were staged, and pullComplete whether the pull itself finished.',
       ),
   }),
   enrichment: {
-    totalCount: z.number().describe('Total rows in the full series.'),
+    totalCount: z
+      .number()
+      .describe(
+        'Rows in the full series for this range. A floor rather than an exact count when totalCountIsLowerBound is set; never below pulledCount.',
+      ),
+    totalCountIsLowerBound: z
+      .boolean()
+      .optional()
+      .describe(
+        'Set when totalCount is only a floor: the pull stopped early and OpenAQ reported the range total as ">N" instead of an exact number, so more rows exist than totalCount states. Absent when the count is exact.',
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'What limited this response, when something did — the row cap, a failed page, or DataCanvas being unavailable — plus how to reach the rest.',
+        'What limited this response or where the rest of it lives — the row cap, a failed page, DataCanvas being unavailable, or the canvas table the series was staged on and the tools that read it.',
       ),
   },
   errors: [
@@ -361,6 +385,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
     const pageSize = Math.min(input.limit, PAGE_LIMIT);
     const allRows: SeriesRow[] = [];
     let found = 0;
+    let foundIsLowerBound = false;
     let exhausted = false;
     for (let page = 1; allRows.length < MAX_ROWS; page++) {
       // Covers an abort that lands between pages, when no fetch is in flight.
@@ -400,6 +425,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
         break;
       }
       found = result.found;
+      foundIsLowerBound = result.foundIsLowerBound;
       allRows.push(...result.results.map(toSeriesRow));
       if (result.results.length < pageSize) {
         exhausted = true;
@@ -418,13 +444,26 @@ export const getMeasurements = tool('openaq_get_measurements', {
       );
     }
 
-    const totalRows = exhausted ? allRows.length : Math.max(found, allRows.length);
-    ctx.enrich.total(Number.isFinite(totalRows) ? totalRows : allRows.length);
+    // An exhausted pull holds the whole range, so its own count is the exact
+    // total whatever `meta.found` claimed. A pull that stopped early publishes
+    // the upstream figure, floored at the rows in hand — and says the figure is
+    // a floor when OpenAQ only gave a ">N" bound, so 5,001 matching rows are
+    // distinguishable from 500,000.
+    const pullComplete = exhausted;
+    const pulledCount = allRows.length;
+    const totalCount = pullComplete ? pulledCount : Math.max(found, pulledCount);
+    const totalCountIsLowerBound = !pullComplete && foundIsLowerBound;
+    ctx.enrich.total(totalCount);
+    if (totalCountIsLowerBound) ctx.enrich({ totalCountIsLowerBound: true });
 
-    if (allRows.length >= MAX_ROWS) {
+    if (pulledCount >= MAX_ROWS) {
       // There is no page/offset input, so the rows past the cap are reachable
       // only by re-slicing the range — which nothing else in the response says.
-      const ofTotal = Number.isFinite(totalRows) ? ` of ${totalRows}` : '';
+      // A total no higher than the rows in hand adds nothing to "not complete".
+      const ofTotal =
+        totalCount > pulledCount
+          ? ` of ${totalCountIsLowerBound ? 'at least ' : ''}${totalCount}`
+          : '';
       notices.push(
         `Pull capped at ${MAX_ROWS} rows${ofTotal} — this series is not complete. Split the date range into shorter windows, or use hourly/daily aggregation to fit the whole span under the cap.`,
       );
@@ -438,7 +477,7 @@ export const getMeasurements = tool('openaq_get_measurements', {
     };
     const locationOut = { id: location.id, name: location.name ?? `location ${location.id}` };
 
-    const overflow = allRows.length > PREVIEW_ROWS;
+    const overflow = pulledCount > PREVIEW_ROWS;
     const previewRows = overflow ? allRows.slice(0, PREVIEW_ROWS) : allRows;
     const base = {
       location: locationOut,
@@ -447,38 +486,66 @@ export const getMeasurements = tool('openaq_get_measurements', {
       aggregation: input.aggregation,
       series: previewRows.map((r) => toOutputRow(r, input.aggregation)),
       rowCount: previewRows.length,
+      pulledCount,
+      pullComplete,
     };
 
     /** Canvas pointers, set only when staging succeeded. */
     let spill: { canvasId: string; tableName: string } | undefined;
 
-    if (!overflow) {
-      ctx.log.info('Measurement series fit inline', { sensorId: sensor.id, rows: allRows.length });
+    // A supplied canvas_id is a request to put this series on that canvas at any
+    // size — a side-by-side comparison needs both series there, and a caller
+    // cannot join against a canvas the call silently skipped. With no id, only an
+    // overflowing series needs one, so a small pull burns no tenant canvas slot.
+    if (!overflow && input.canvas_id === undefined) {
+      ctx.log.info('Measurement series fit inline', { sensorId: sensor.id, rows: pulledCount });
     } else {
-      // Series overflows the inline preview — stage the pulled rows on the canvas
-      // if one is available. A canvas that cannot be reached degrades the response
-      // rather than failing it: the rows are already fetched either way.
+      /** What a response that failed to stage still holds, for the notice wording. */
+      const inlineState = overflow
+        ? `this response is capped at ${PREVIEW_ROWS} of ${pulledCount} rows`
+        : `the ${pulledCount}-row series is inline here but staged nowhere`;
+      /** A caller who named a canvas is told what became of it, on every degraded path. */
+      const notReused =
+        input.canvas_id === undefined ? '' : `Canvas ${input.canvas_id} could not be reused: `;
+      // A canvas that cannot be reached degrades the response rather than failing
+      // it: the rows are already fetched either way.
       const canvas = getCanvas();
       if (!canvas) {
         notices.push(
-          `Series truncated to ${PREVIEW_ROWS} of ${allRows.length} rows — enable DataCanvas (CANVAS_PROVIDER_TYPE=duckdb) to query them all, or narrow the range / use daily aggregation. Rows ${PREVIEW_ROWS + 1}–${allRows.length} are not in this response.`,
+          overflow
+            ? `${notReused}DataCanvas is not enabled (CANVAS_PROVIDER_TYPE=duckdb), so ${inlineState}. Enable it to query them all, or narrow the range / use daily aggregation. Rows ${PREVIEW_ROWS + 1}–${pulledCount} are not in this response.`
+            : `${notReused}DataCanvas is not enabled (CANVAS_PROVIDER_TYPE=duckdb), so ${inlineState}. Enable it to stage series side by side and query them together.`,
         );
-        ctx.log.info('Measurement series truncated (no canvas)', {
+        ctx.log.info('Measurement series not staged (no canvas)', {
           sensorId: sensor.id,
-          rows: allRows.length,
+          rows: pulledCount,
         });
       } else {
         try {
           const instance = await canvas.acquire(input.canvas_id, ctx);
           const tableName = `measurements_${sensor.id}`;
-          await instance.drop(tableName); // idempotent re-stage when reusing a canvas
+          // Idempotent re-stage when reusing a canvas. `drop` reports whether a
+          // table was actually removed — that is the replacement to disclose.
+          const replaced = await instance.drop(tableName);
           const handle = await instance.registerTable(tableName, allRows, { signal: ctx.signal });
           spill = { canvasId: instance.canvasId, tableName: handle.tableName };
+          // The response that mints the handle is where an agent learns the
+          // handle exists. describe() comes first because the staged table is
+          // flat (min, sd) while `series` is nested (summary.min), so SQL written
+          // from the response shape alone names columns that do not exist.
+          notices.push(
+            `Series staged on this canvas as table ${handle.tableName} (${handle.rowCount} rows). Call openaq_dataframe_describe with this canvas_id to see the table's columns, then openaq_dataframe_query to run SQL over it.${
+              replaced
+                ? ` This replaced the earlier ${handle.tableName} series staged on the canvas — one table per sensor, so re-staging the same sensor overwrites it.`
+                : ''
+            }`,
+          );
           ctx.log.info('Measurement series staged on canvas', {
             sensorId: sensor.id,
             canvasId: instance.canvasId,
             tableName: handle.tableName,
             rows: handle.rowCount,
+            replaced,
           });
         } catch (err) {
           // Staging aborts on the same signal; a cancelled request must not be
@@ -494,13 +561,13 @@ export const getMeasurements = tool('openaq_get_measurements', {
               { cause: err },
             );
           }
-          ctx.log.warning('DataCanvas staging failed — returning the truncated preview', {
+          ctx.log.warning('DataCanvas staging failed — returning the rows already pulled', {
             sensorId: sensor.id,
-            rows: allRows.length,
+            rows: pulledCount,
             error: err instanceof Error ? err.message : String(err),
           });
           notices.push(
-            `DataCanvas is configured but could not stage the series (${err instanceof Error ? err.message : String(err)}), so this response is capped at ${PREVIEW_ROWS} of ${allRows.length} rows. Narrow the range or use daily aggregation to fit the series inline, or fix the canvas provider to query it all.`,
+            `${notReused}DataCanvas is configured but could not stage the series (${err instanceof Error ? err.message : String(err)}), so ${inlineState}. ${overflow ? 'Narrow the range or use daily aggregation to fit the series inline, or fix' : 'Fix'} the canvas provider to stage it.`,
           );
         }
       }
@@ -518,21 +585,21 @@ export const getMeasurements = tool('openaq_get_measurements', {
   format: (result) => {
     const head = `## ${result.location.name} (id ${result.location.id}) — ${result.parameter.displayName ?? result.parameter.name} (\`${result.parameter.name}\` #${result.parameter.id}, ${result.parameter.unit})`;
 
-    const displayed = result.series.slice(0, DISPLAY_ROWS);
-    const hidden = result.series.length - displayed.length;
-    const count =
-      hidden > 0
-        ? `${displayed.length} of ${result.rowCount} ${result.truncated ? 'preview ' : ''}rows shown`
-        : `${result.rowCount} rows shown`;
-    const meta = `aggregation: ${result.aggregation} · sensor ${result.sensorId} · ${count}`;
+    const pull = `${result.pulledCount} pulled · pull ${result.pullComplete ? 'complete' : 'incomplete'}`;
+    const meta = `aggregation: ${result.aggregation} · sensor ${result.sensorId} · ${result.rowCount} rows shown · ${pull}`;
 
-    const spill = result.truncated
-      ? result.canvasId
-        ? `\n**Truncated** — series staged on canvas \`${result.canvasId}\`, table \`${result.tableName}\`. Query with openaq_dataframe_query.`
-        : '\n**Truncated** — preview only; DataCanvas is unavailable, so nothing past this preview is retrievable from this response.'
-      : '';
+    // The canvas pointer stands on canvasId; the Truncated label stands on
+    // truncated. A supplied canvas_id stages a series that fits inline, so the
+    // two are independent.
+    const spill = result.canvasId
+      ? `\n${result.truncated ? '**Truncated** — series' : 'Series'} staged on canvas \`${result.canvasId}\`, table \`${result.tableName}\`. Describe it with openaq_dataframe_describe, then query it with openaq_dataframe_query.`
+      : result.truncated
+        ? '\n**Truncated** — preview only; DataCanvas is unavailable, so nothing past this preview is retrievable from this response.'
+        : '';
 
-    const rows = displayed
+    // Every row the response carries is rendered: a text-only client and a
+    // structured-content client must reason over the same sample.
+    const rows = result.series
       .map((r) => {
         // A gap bucket carries no value, so it carries no unit either.
         const reading =
@@ -547,11 +614,6 @@ export const getMeasurements = tool('openaq_get_measurements', {
       })
       .join('\n');
 
-    const rest =
-      hidden > 0
-        ? `\n\n_${hidden} further row${hidden === 1 ? '' : 's'} of this ${result.truncated ? 'preview' : 'series'} are in structuredContent.series but not rendered here._`
-        : '';
-
-    return [{ type: 'text', text: [head, meta + spill, '', rows].join('\n') + rest }];
+    return [{ type: 'text', text: [head, meta + spill, '', rows].join('\n') }];
   },
 });

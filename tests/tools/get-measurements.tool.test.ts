@@ -15,7 +15,7 @@ import {
   serviceUnavailable,
   timeout,
 } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { getMeasurements } from '@/mcp-server/tools/definitions/get-measurements.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
@@ -38,12 +38,23 @@ const ctxWith = () => createMockContext({ errors: getMeasurements.errors });
 const onePage = (results: OpenAqMeasurement[]): MeasurementsPage => ({
   results,
   found: results.length,
+  foundIsLowerBound: false,
 });
 
-/** A full page (1000 rows) — the pager keeps going after one of these. */
-const fullPage = (row: OpenAqMeasurement, found: number): MeasurementsPage => ({
+/**
+ * A full page (1000 rows) — the pager keeps going after one of these. `found` is
+ * the numeric floor the service reads out of `meta.found`; pass
+ * `foundIsLowerBound: true` for the `">N"` shape, where more rows exist than the
+ * number says.
+ */
+const fullPage = (
+  row: OpenAqMeasurement,
+  found: number,
+  foundIsLowerBound = false,
+): MeasurementsPage => ({
   results: Array.from({ length: 1000 }, () => row),
   found,
+  foundIsLowerBound,
 });
 
 /** The text of the single block `format()` returns. */
@@ -244,6 +255,8 @@ describe('openaq_get_measurements', () => {
         },
       ],
       rowCount: 1,
+      pulledCount: 983,
+      pullComplete: true,
       canvasId: 'abc1234567',
       tableName: 'measurements_1701',
       truncated: true,
@@ -298,6 +311,8 @@ describe('openaq_get_measurements gap buckets (#11)', () => {
         },
       ],
       rowCount: 1,
+      pulledCount: 1,
+      pullComplete: true,
     });
     expect(text).toContain('no data');
     expect(text).not.toContain('null');
@@ -467,7 +482,7 @@ describe('openaq_get_measurements partial pulls (#12)', () => {
       getMeasurements: async (_sensorId, params) => {
         if (params.page >= 3)
           throw timeout('OpenAQ timed out serving the request.', { status: 408 });
-        return fullPage(rawMeasurement, Number.POSITIVE_INFINITY);
+        return fullPage(rawMeasurement, 1000, true);
       },
     });
     const ctx = ctxWith();
@@ -510,6 +525,139 @@ describe('openaq_get_measurements partial pulls (#12)', () => {
     expect(result.truncated).toBe(true);
     expect(getEnrichment(ctx).totalCount).toBe(12_000);
     expect(getEnrichment(ctx).notice).toMatch(/capped at 5000 rows of 12000/);
+    // An exact upstream total stays exact — the cap bounds the pull, not the count.
+    expect(getEnrichment(ctx).totalCountIsLowerBound).toBeUndefined();
+    expect(result.pulledCount).toBe(5000);
+    expect(result.pullComplete).toBe(false);
+  });
+});
+
+/**
+ * `meta.found` arrives as `">N"` for a multi-page raw series, so the number in it
+ * is a floor. A pull that stops early cannot turn that floor into an exact total,
+ * and publishing the rows it managed to pull as the series total made 5,001
+ * matching rows indistinguishable from 500,000.
+ */
+describe('openaq_get_measurements incomplete pulls report a floor (#23)', () => {
+  /** A pager that never exhausts, reporting `found` (optionally as a lower bound). */
+  const endlessSeries = (found: number, isLowerBound: boolean) =>
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => fullPage(rawMeasurement, found, isLowerBound),
+    });
+
+  const pullRaw = async () => {
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation: 'raw' }),
+      ctx,
+    );
+    return { ctx, result };
+  };
+
+  it('flags the total as a floor when the cap stops a ">N" series, never below what it pulled', async () => {
+    endlessSeries(1000, true);
+    const { ctx, result } = await pullRaw();
+
+    expect(result.pulledCount).toBe(5000);
+    expect(result.pullComplete).toBe(false);
+    expect(getEnrichment(ctx).totalCountIsLowerBound).toBe(true);
+    // The floor never drops below the rows actually in hand.
+    expect(getEnrichment(ctx).totalCount).toBe(5000);
+    // A floor below the rows in hand names no total — the flag carries "more exist".
+    expect(getEnrichment(ctx).notice).toMatch(/capped at 5000 rows — this series is not complete/);
+    expect(getEnrichment(ctx).notice).not.toMatch(/of at least/);
+  });
+
+  it('names the upstream floor when it exceeds the rows pulled', async () => {
+    endlessSeries(8000, true);
+    const { ctx, result } = await pullRaw();
+
+    expect(result.pulledCount).toBe(5000);
+    expect(getEnrichment(ctx).totalCount).toBe(8000);
+    expect(getEnrichment(ctx).totalCountIsLowerBound).toBe(true);
+    expect(getEnrichment(ctx).notice).toMatch(/capped at 5000 rows of at least 8000/);
+  });
+
+  it('flags the total as a floor when a mid-pager page failure stops a ">N" series', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async (_sensorId, params) => {
+        if (params.page >= 3)
+          throw timeout('OpenAQ timed out serving the request.', { status: 408 });
+        return fullPage(rawMeasurement, 1000, true);
+      },
+    });
+    const { ctx, result } = await pullRaw();
+
+    expect(result.pulledCount).toBe(2000);
+    expect(result.pullComplete).toBe(false);
+    expect(getEnrichment(ctx).totalCount).toBe(2000);
+    expect(getEnrichment(ctx).totalCountIsLowerBound).toBe(true);
+  });
+
+  it('keeps an exact upstream total exact when a page failure stops the pull', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async (_sensorId, params) => {
+        if (params.page >= 3)
+          throw timeout('OpenAQ timed out serving the request.', { status: 408 });
+        return fullPage(rawMeasurement, 9000);
+      },
+    });
+    const { ctx, result } = await pullRaw();
+
+    expect(result.pullComplete).toBe(false);
+    expect(getEnrichment(ctx).totalCount).toBe(9000);
+    expect(getEnrichment(ctx).totalCountIsLowerBound).toBeUndefined();
+  });
+
+  it('reports an exhausted pull as exact and complete, whatever meta.found said', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => ({
+        results: Array.from({ length: 40 }, () => dailyMeasurement),
+        found: 5,
+        foundIsLowerBound: true,
+      }),
+    });
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation: 'daily' }),
+      ctx,
+    );
+
+    expect(result.pullComplete).toBe(true);
+    expect(result.pulledCount).toBe(40);
+    expect(getEnrichment(ctx).totalCount).toBe(40);
+    expect(getEnrichment(ctx).totalCountIsLowerBound).toBeUndefined();
+  });
+
+  it('never publishes a total below the rows pulled, or a complete pull beside a cap notice', async () => {
+    for (const [found, isLowerBound] of [
+      [0, false],
+      [12_000, false],
+      [1000, true],
+    ] as const) {
+      endlessSeries(found, isLowerBound);
+      const { ctx, result } = await pullRaw();
+      const enrichment = getEnrichment(ctx);
+
+      expect(enrichment.totalCount as number).toBeGreaterThanOrEqual(result.pulledCount);
+      expect(result.pullComplete).toBe(false);
+      expect(enrichment.notice).toMatch(/capped at 5000 rows/);
+      // "of 5000" beside "not complete" would contradict itself.
+      expect(enrichment.notice).not.toMatch(/5000 rows of (at least )?5000/);
+    }
+  });
+
+  it('renders the pulled count and pull completeness in content[] (#24 parity)', async () => {
+    endlessSeries(1000, true);
+    const { result } = await pullRaw();
+    const text = formatText(result);
+
+    expect(text).toContain('5000 pulled');
+    expect(text).toContain('pull incomplete');
   });
 });
 
@@ -567,6 +715,44 @@ describe('openaq_get_measurements canvas staging failures (#19)', () => {
     expect(result.truncated).toBe(true);
     expect(result.canvasId).toBeUndefined();
     expect(getEnrichment(ctx).notice).toMatch(/duckdb instance closed/);
+    expect(getEnrichment(ctx).notice).toMatch(/Narrow the range/);
+  });
+
+  it('tells an inline series on a supplied canvas to fix the provider, not to narrow the range', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => onePage(Array.from({ length: 12 }, () => dailyMeasurement)),
+    });
+    setCanvas({
+      acquire: vi.fn(async () => ({
+        canvasId: 'abc1234567',
+        isNew: false,
+        drop: vi.fn(async () => false),
+        registerTable: vi.fn(async () => {
+          throw new Error('duckdb instance closed');
+        }),
+      })),
+    } as unknown as DataCanvas);
+
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({
+        locationId: 931,
+        parametersId: 2,
+        aggregation: 'daily',
+        canvas_id: 'abc1234567',
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBeUndefined();
+    expect(result.canvasId).toBeUndefined();
+    expect(result.series).toHaveLength(12);
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toMatch(/Canvas abc1234567 could not be reused/);
+    expect(notice).toMatch(/12-row series is inline here but staged nowhere/);
+    expect(notice).toMatch(/Fix the canvas provider/);
+    expect(notice).not.toMatch(/Narrow the range|truncated|capped/);
   });
 
   it('still fails a supplied canvas_id that cannot be resolved — that one is the caller to fix', async () => {
@@ -597,6 +783,274 @@ describe('openaq_get_measurements canvas staging failures (#19)', () => {
   });
 });
 
+/**
+ * A supplied `canvas_id` is a request to put this series on that canvas, and a
+ * side-by-side comparison needs both series there whatever their sizes. Reading
+ * the id only inside the overflow branch discarded it silently on a narrow range
+ * and made the verdict on a bad id depend on the result size.
+ */
+describe('openaq_get_measurements honours a supplied canvas_id at any size (#35)', () => {
+  /** 71 rows — comfortably inside the 100-row inline preview. */
+  const narrowSeries = () =>
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => onePage(Array.from({ length: 71 }, () => dailyMeasurement)),
+    });
+
+  const stagingCanvas = (dropped = false) => {
+    const registerTable = vi.fn(async (name: string, rows: unknown[]) => ({
+      tableName: name,
+      rowCount: rows.length,
+      columns: ['datetimeFrom', 'value'],
+    }));
+    const drop = vi.fn(async () => dropped);
+    const acquire = vi.fn(async () => ({
+      canvasId: 'abc1234567',
+      isNew: !dropped,
+      registerTable,
+      drop,
+    }));
+    setCanvas({ acquire } as unknown as DataCanvas);
+    return { acquire, drop, registerTable };
+  };
+
+  const callNarrow = async (canvas_id?: string) => {
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({
+        locationId: 931,
+        parametersId: 2,
+        aggregation: 'daily',
+        ...(canvas_id ? { canvas_id } : {}),
+      }),
+      ctx,
+    );
+    return { ctx, result };
+  };
+
+  it('stages a series that fits inline onto a valid supplied canvas, without marking it truncated', async () => {
+    narrowSeries();
+    const { acquire, registerTable } = stagingCanvas();
+    const { result } = await callNarrow('abc1234567');
+
+    expect(acquire).toHaveBeenCalledWith('abc1234567', expect.anything());
+    expect(registerTable).toHaveBeenCalledWith(
+      'measurements_1701',
+      expect.any(Array),
+      expect.anything(),
+    );
+    expect(result.canvasId).toBe('abc1234567');
+    expect(result.tableName).toBe('measurements_1701');
+    expect(result.truncated).toBeUndefined();
+    expect(result.series).toHaveLength(71); // nothing withheld
+  });
+
+  it('raises canvas_not_found for an unresolvable id on a narrow range too', async () => {
+    narrowSeries();
+    setCanvas({
+      acquire: vi.fn(async () => {
+        throw notFound('Canvas not found.', { reason: 'canvas_not_found' });
+      }),
+    } as unknown as DataCanvas);
+
+    await expect(callNarrow('goneCanvs1')).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'canvas_not_found', canvasId: 'goneCanvs1' },
+    });
+  });
+
+  it('touches no canvas when canvas_id is omitted and the series fits inline', async () => {
+    narrowSeries();
+    const { acquire } = stagingCanvas();
+    const { ctx, result } = await callNarrow();
+
+    expect(acquire).not.toHaveBeenCalled();
+    expect(result.canvasId).toBeUndefined();
+    expect(result.truncated).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toBeUndefined();
+  });
+
+  it('names the canvas and table in content[] on a staged-but-not-truncated response', () => {
+    const text = formatText({
+      location: { id: 931, name: 'Seattle-10th & Weller' },
+      parameter: { id: 2, name: 'pm25', unit: 'µg/m³', displayName: 'PM2.5' },
+      sensorId: 1701,
+      aggregation: 'daily',
+      series: [],
+      rowCount: 0,
+      pulledCount: 71,
+      pullComplete: true,
+      canvasId: 'abc1234567',
+      tableName: 'measurements_1701',
+    });
+
+    expect(text).toContain('abc1234567');
+    expect(text).toContain('measurements_1701');
+    expect(text).not.toContain('**Truncated**');
+  });
+
+  it('degrades with an accurate notice when a supplied id cannot be staged at all', async () => {
+    narrowSeries();
+    setCanvas(undefined);
+    const { ctx, result } = await callNarrow('abc1234567');
+
+    expect(result.canvasId).toBeUndefined();
+    expect(result.truncated).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toMatch(/DataCanvas|CANVAS_PROVIDER_TYPE/);
+    expect(getEnrichment(ctx).notice).toMatch(/Canvas abc1234567 could not be reused/);
+    expect(getEnrichment(ctx).notice).not.toMatch(/truncated/i);
+  });
+
+  it('names the supplied id on the no-canvas overflow path too', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => onePage(Array.from({ length: 150 }, () => dailyMeasurement)),
+    });
+    setCanvas(undefined);
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({
+        locationId: 931,
+        parametersId: 2,
+        aggregation: 'daily',
+        canvas_id: 'abc1234567',
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBe(true);
+    expect(result.canvasId).toBeUndefined();
+    const notice = getEnrichment(ctx).notice as string;
+    expect(notice).toMatch(/Canvas abc1234567 could not be reused/);
+    expect(notice).toMatch(/capped at 100 of 150 rows/);
+    expect(notice).toMatch(/Rows 101–150 are not in this response/);
+  });
+});
+
+/**
+ * The response that mints a canvas handle is the only place an agent learns the
+ * handle exists, so it has to name the tools that can read it — describe first,
+ * because the staged table is flat (`min`, `sd`) while the response `series` is
+ * nested (`summary.min`), and SQL written from the response shape misses.
+ */
+describe('openaq_get_measurements points at the dataframe tools when it stages (#32, #36)', () => {
+  const series = (rows: number) =>
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async () => onePage(Array.from({ length: rows }, () => dailyMeasurement)),
+    });
+
+  const canvasThatDropped = (dropped: boolean) => {
+    const drop = vi.fn(async () => dropped);
+    setCanvas({
+      acquire: vi.fn(async () => ({
+        canvasId: 'abc1234567',
+        isNew: !dropped,
+        drop,
+        registerTable: vi.fn(async (name: string, rows: unknown[]) => ({
+          tableName: name,
+          rowCount: rows.length,
+          columns: ['datetimeFrom', 'value'],
+        })),
+      })),
+    } as unknown as DataCanvas);
+    return drop;
+  };
+
+  const stage = async (rows: number, dropped: boolean) => {
+    series(rows);
+    canvasThatDropped(dropped);
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation: 'daily' }),
+      ctx,
+    );
+    return { ctx, result, notice: getEnrichment(ctx).notice as string };
+  };
+
+  it('names the staged table, then describe, then query', async () => {
+    const { notice } = await stage(150, false);
+
+    expect(notice).toContain('measurements_1701');
+    expect(notice.indexOf('measurements_1701')).toBeLessThan(
+      notice.indexOf('openaq_dataframe_describe'),
+    );
+    expect(notice.indexOf('openaq_dataframe_describe')).toBeLessThan(
+      notice.indexOf('openaq_dataframe_query'),
+    );
+  });
+
+  it('does not claim truncation on a staged response that fits inline', async () => {
+    series(71);
+    canvasThatDropped(false);
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({
+        locationId: 931,
+        parametersId: 2,
+        aggregation: 'daily',
+        canvas_id: 'abc1234567',
+      }),
+      ctx,
+    );
+
+    expect(result.truncated).toBeUndefined();
+    expect(getEnrichment(ctx).notice).toContain('openaq_dataframe_describe');
+    expect(getEnrichment(ctx).notice).not.toMatch(/truncated/i);
+  });
+
+  it('names both dataframe tools in the content[] spill line', async () => {
+    const { result } = await stage(150, false);
+    const text = formatText(result);
+
+    expect(text).toContain('openaq_dataframe_describe');
+    expect(text).toContain('openaq_dataframe_query');
+    expect(text.indexOf('openaq_dataframe_describe')).toBeLessThan(
+      text.indexOf('openaq_dataframe_query'),
+    );
+  });
+
+  it('names both dataframe tools in the canvasId and tableName descriptions', () => {
+    const shape = getMeasurements.output.shape;
+    for (const field of [shape.canvasId, shape.tableName]) {
+      const described = field.description ?? '';
+      expect(described).toContain('openaq_dataframe_describe');
+      expect(described).toContain('openaq_dataframe_query');
+    }
+  });
+
+  it('reports that an earlier series for this sensor was replaced (#36)', async () => {
+    const { notice } = await stage(150, true);
+
+    expect(notice).toMatch(/replaced/i);
+    expect(notice).toContain('measurements_1701');
+  });
+
+  it('says nothing about replacement when the canvas held no table for this sensor (#36)', async () => {
+    const { notice } = await stage(150, false);
+
+    expect(notice).not.toMatch(/replaced/i);
+  });
+
+  it('carries the staging notice — replacement line included — into content[] (#32, #36)', async () => {
+    series(150);
+    canvasThatDropped(true);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+    });
+    const text = result.content
+      .map((block) => (block.type === 'text' ? block.text : ''))
+      .join('\n');
+
+    expect(result.isError).toBeFalsy();
+    expect(text).toContain('openaq_dataframe_describe');
+    expect(text).toContain('openaq_dataframe_query');
+    expect(text).toMatch(/replaced/i);
+  });
+});
+
 describe('openaq_get_measurements format row accounting (#15) and rounding (#10)', () => {
   const previewResult = (rows: number, truncated: boolean) => ({
     location: { id: 1938, name: 'Seattle-Beacon Hill' },
@@ -612,20 +1066,22 @@ describe('openaq_get_measurements format row accounting (#15) and rounding (#10)
       flagged: false,
     })),
     rowCount: rows,
+    pulledCount: truncated ? rows * 10 : rows,
+    pullComplete: true,
     ...(truncated
       ? { truncated: true, canvasId: 'abc1234567', tableName: 'measurements_3425' }
       : {}),
   });
 
-  it('states the rendered count honestly when the preview exceeds the display slice', () => {
+  it('renders every row the response carries, so both surfaces see the same set', () => {
     const text = formatText(previewResult(100, true));
     const rendered = text.split('\n').filter((l) => l.startsWith('- ')).length;
 
-    expect(rendered).toBe(20);
-    expect(text).toContain('20 of 100 preview rows shown');
-    expect(text).not.toContain('100 rows shown');
-    expect(text).toContain('80 further rows');
-    expect(text).toContain('structuredContent.series');
+    expect(rendered).toBe(100);
+    expect(text).toContain('100 rows shown');
+    expect(text).not.toContain('20 of 100 preview rows shown');
+    expect(text).not.toContain('further rows');
+    expect(text).not.toContain('preview rows shown');
   });
 
   it('renders every row and drops the split note when the series fits the display slice', () => {
