@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-09-22
+
+openaq_get_measurements now reports honest pull totals and stages series on request; openaq_dataframe_query caps responses at 200 rows; both tools render every row they carry and point callers at describe-then-query.
+
 ## [0.1.9](changelog/0.1.x/0.1.9.md) — 2026-09-20
 
 mcp-ts-core ^0.12.3 → ^0.13.6 — the canvas_id inputs advertise the minted-id pattern and reject a malformed id at argument validation, and an unset MCP_SESSION_MODE now resolves to stateless instead of stateful.
