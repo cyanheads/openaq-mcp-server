@@ -68,8 +68,13 @@ export interface MeasurementsParams {
 
 /** A measurements page, carrying the parsed `meta.found` total for enrichment. */
 export interface MeasurementsPage {
-  /** Parsed total across all pages — `Infinity` when the API reports `">N"`. */
+  /**
+   * Total across all pages as a number. A floor rather than an exact total when
+   * `foundIsLowerBound` is set — read the two together.
+   */
   found: number;
+  /** True when the API reported `">N"`, so `found` is N and more rows exist. */
+  foundIsLowerBound: boolean;
   results: OpenAqMeasurement[];
 }
 
@@ -90,15 +95,6 @@ function interpretFound(found: number | string | undefined): {
     return { total: digits.length > 0 ? Number(digits) : 0, isLowerBound: found.includes('>') };
   }
   return { total: 0, isLowerBound: false };
-}
-
-/**
- * `meta.found` → a usable number for the measurement pager. A `">N"` lower bound is
- * an unbounded ceiling (`Infinity`) — the row cap, not this value, bounds the pull.
- */
-function parseFound(found: number | string | undefined): number {
-  const { total, isLowerBound } = interpretFound(found);
-  return isLowerBound ? Number.POSITIVE_INFINITY : total;
 }
 
 const GENERIC_VALIDATION_MESSAGE = 'OpenAQ rejected the request parameters.';
@@ -333,7 +329,10 @@ export class OpenAqService {
       'openaq.getMeasurements',
       ctx,
     );
-    return { results: res.results, found: parseFound(res.meta?.found) };
+    // The floor plus the flag, never a collapsed `Infinity`: a caller that stops
+    // early has to publish a usable bound.
+    const { total, isLowerBound } = interpretFound(res.meta?.found);
+    return { results: res.results, found: total, foundIsLowerBound: isLowerBound };
   }
 
   /** `GET /v3/parameters` — the full pollutant + unit catalog (~44 entries). */
@@ -379,4 +378,4 @@ export function setOpenAqService(service: OpenAqService): void {
   _service = service;
 }
 
-export { extractValidationMessage, interpretFound, parseFound };
+export { extractValidationMessage, interpretFound };

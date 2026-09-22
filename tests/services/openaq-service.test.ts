@@ -14,7 +14,6 @@ import {
   extractValidationMessage,
   interpretFound,
   OpenAqService,
-  parseFound,
 } from '@/services/openaq/openaq-service.js';
 import {
   parameters,
@@ -37,21 +36,6 @@ function makeService(): OpenAqService {
   return new OpenAqService({} as never, {} as never);
 }
 
-describe('parseFound', () => {
-  it('returns a number unchanged', () => {
-    expect(parseFound(42)).toBe(42);
-  });
-  it('parses ">N" strings as Infinity (more pages exist)', () => {
-    expect(parseFound('>2')).toBe(Number.POSITIVE_INFINITY);
-  });
-  it('parses a plain numeric string', () => {
-    expect(parseFound('150')).toBe(150);
-  });
-  it('treats undefined as 0', () => {
-    expect(parseFound(undefined)).toBe(0);
-  });
-});
-
 describe('interpretFound', () => {
   it('treats a bare number as an exact total', () => {
     expect(interpretFound(150)).toEqual({ total: 150, isLowerBound: false });
@@ -64,6 +48,9 @@ describe('interpretFound', () => {
   });
   it('treats undefined as an exact zero', () => {
     expect(interpretFound(undefined)).toEqual({ total: 0, isLowerBound: false });
+  });
+  it('keeps the multi-page raw-series ">1000" as a 1000 floor', () => {
+    expect(interpretFound('>1000')).toEqual({ total: 1000, isLowerBound: true });
   });
 });
 
@@ -307,7 +294,7 @@ describe('OpenAqService error classification', () => {
     });
   });
 
-  it('getMeasurements parses meta.found and returns the page', async () => {
+  it('getMeasurements carries a ">N" meta.found as a numeric floor plus the lower-bound flag', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(okJson({ meta: { found: '>2' }, results: [] }));
     const svc = makeService();
     const page = await svc.getMeasurements(
@@ -315,8 +302,23 @@ describe('OpenAqService error classification', () => {
       { aggregation: 'daily', limit: 1000, page: 1 },
       createMockContext(),
     );
-    expect(page.found).toBe(Number.POSITIVE_INFINITY);
+    // A floor the handler can publish, never Infinity: a pull that stops short
+    // still has to report a bound a client can use.
+    expect(page.found).toBe(2);
+    expect(page.foundIsLowerBound).toBe(true);
     expect(page.results).toEqual([]);
+  });
+
+  it('getMeasurements carries an exact meta.found with the lower-bound flag clear', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(okJson({ meta: { found: 215 }, results: [] }));
+    const svc = makeService();
+    const page = await svc.getMeasurements(
+      1701,
+      { aggregation: 'daily', limit: 1000, page: 1 },
+      createMockContext(),
+    );
+    expect(page.found).toBe(215);
+    expect(page.foundIsLowerBound).toBe(false);
   });
 
   it('getLocation returns the first result for a known id', async () => {
