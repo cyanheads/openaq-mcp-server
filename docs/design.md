@@ -14,10 +14,10 @@ actual reading from a physical monitor — sparser, unevenly distributed, but re
 |:-----|:------------|:-----------|:------------|
 | `openaq_find_locations` | Find air-quality monitoring stations (measured, not modeled) near a point, in a bounding box, or by country. Returns location id, name, coordinates, distance, country, provider, the parameters each measures, and `datetimeLast`. Required first step — readings and measurements key on the location/sensor ids this returns. A missing station means no coverage, not clean air. | `coordinates`, `radius`, `bbox`, `iso`, `parametersId`, `limit` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
 | `openaq_get_readings` | Latest measured value for every sensor at a location (or the nearest location to coordinates). Returns per parameter: value, unit, UTC + local timestamp, and the sensor id — joined so each value carries its pollutant and unit. The current-conditions tool. Recency varies by station; each value's timestamp shows whether "latest" is minutes or hours old. | `locationId` \| (`coordinates` + `parametersId`), `parametersId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
-| `openaq_get_measurements` | Historical measurement series for one parameter at a location over a date range. Resolves the location's sensor for that parameter internally (measurements are sensor-scoped in v3) so you pass a location, not a sensor. Optional `aggregation` (`raw`/`hourly`/`daily`) — `daily` adds a per-day statistical summary. Large ranges spill to DataCanvas; the response carries `canvasId` + a truncated preview, queryable via `openaq_dataframe_query`. | `locationId`, `parametersId`, `datetimeFrom`, `datetimeTo`, `aggregation`, `canvasId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
+| `openaq_get_measurements` | Historical measurement series for one parameter at a location over a date range. Resolves the location's sensor for that parameter internally (measurements are sensor-scoped in v3) so you pass a location, not a sensor. Optional `aggregation` (`raw`/`hourly`/`daily`) — `daily` adds a per-day statistical summary. The pulled rows stage on a DataCanvas when the series overflows the inline preview or a `canvas_id` was supplied; the response carries `canvasId` + `tableName` and names the path to read them — `openaq_dataframe_describe`, then `openaq_dataframe_query`. | `locationId`, `parametersId`, `datetimeFrom`, `datetimeTo`, `aggregation`, `canvasId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
 | `openaq_list_parameters` | Catalog of measurable pollutants and their canonical units: id, code, display name, unit, description (pm25, pm10, o3, no2, so2, co, bc, …). The unit-disambiguation tool — the same pollutant exists under several ids with different units (`co` is id 4 µg/m³, id 8 ppm, id 102 ppb). Call this to pick the right `parametersId` and to interpret a reading's unit. | `query` (local filter), `pollutantsOnly` | `readOnlyHint`, `idempotentHint` |
 | `openaq_list_countries` | Catalog of country coverage: id, ISO code, name, station-data date span (`datetimeFirst`/`datetimeLast`), and the parameters measured anywhere in that country. Availability check before a regional `openaq_find_locations` sweep — answers "which countries have NO2 monitoring?". | `query` (local filter) | `readOnlyHint`, `idempotentHint` |
-| `openaq_dataframe_query` | Run a read-only SQL `SELECT` against the measurement tables `openaq_get_measurements` staged on a DataCanvas. Reference tables by the name the measurements call returned (`measurements_<sensorId>`). For aggregation and cross-sensor comparison over series too large to inline. | `canvasId`, `sql` | `readOnlyHint` |
+| `openaq_dataframe_query` | Run a read-only SQL `SELECT` against the measurement tables `openaq_get_measurements` staged on a DataCanvas. Reference tables by the name the measurements call returned (`measurements_<sensorId>`). For aggregation and cross-sensor comparison over series too large to inline. Responses are capped at 200 rows, with `truncated` and a notice naming the `ORDER BY … LIMIT … OFFSET` continuation. | `canvasId`, `sql` | `readOnlyHint` |
 | `openaq_dataframe_describe` | List the tables and columns staged on a DataCanvas so you can write valid SQL for `openaq_dataframe_query` without guessing column names. | `canvasId` | `readOnlyHint` |
 
 Five domain tools + two DataCanvas consumer tools. The canvas pair is mandatory once
@@ -507,14 +507,17 @@ carry their unit; the server never converts between µg/m³, ppm, and ppb.
     }).nullable().describe('Per-bucket statistics — present for hourly/daily, null for raw'),
     percentComplete: z.number().nullable().describe('Coverage of the bucket (0–100); low values flag gappy data'),
     flagged: z.boolean().describe('True if the source flagged this value (quality concern)'),
-  })).describe('The (possibly previewed) series, newest or oldest first per the API. When truncated, this is a preview — query canvasId for the full set.'),
+  })).describe('The (possibly previewed) series, newest or oldest first per the API. When truncated, this is a preview of pulledCount rows — query canvasId for the rest.'),
   rowCount: z.number().describe('Rows in this response (preview length when spilled)'),
-  // DataCanvas spill fields — optional, present only when the range spilled:
-  canvasId: z.string().optional().describe('DataCanvas id holding the full series. Query with openaq_dataframe_query.'),
-  tableName: z.string().optional().describe('Canvas table name for the full series (e.g. "measurements_1701"). Reference it in SQL.'),
-  truncated: z.boolean().optional().describe('True when the series exceeded the inline limit and the full set was staged on canvasId. Absent/false when everything fit inline.'),
+  pulledCount: z.number().describe('Rows pulled from OpenAQ — the canvas table\'s row count when canvasId is present'),
+  pullComplete: z.boolean().describe('True when the pager reached the end of the range; false when the 5000-row cap or a failed page stopped it early'),
+  // DataCanvas staging fields — optional, present only when staging succeeded:
+  canvasId: z.string().optional().describe('DataCanvas id holding the staged series — pulledCount rows of it. Call openaq_dataframe_describe on this id for the table\'s columns, then openaq_dataframe_query to run SQL.'),
+  tableName: z.string().optional().describe('Canvas table holding the staged series (e.g. "measurements_1701"). One table per sensor, so re-staging the same sensor on this canvas overwrites it.'),
+  truncated: z.boolean().optional().describe('True when the series exceeded the inline limit, so series is a preview of the pulled rows. Describes the preview only — canvasId reports staging, pullComplete reports the pull.'),
 }
-// enrichment: totalCount (total rows in the full series)
+// enrichment: totalCount (rows in the full series for this range; a floor when
+// totalCountIsLowerBound is set), totalCountIsLowerBound, notice
 ```
 
 **Errors:**
@@ -543,9 +546,10 @@ errors: [
 ]
 ```
 **Canvas degraded mode (not a thrown error):** When `CANVAS_PROVIDER_TYPE` is not `duckdb` and the
-range would require spillover, the handler returns the truncated preview + `totalCount` and a
-`notice` enrichment ("series truncated — enable DataCanvas for the full set"). It does **not** throw
-— the truncated preview is still useful. The `dataframe_query`/`dataframe_describe` tools throw
+series would stage (it overflows the preview, or a `canvas_id` was supplied), the handler returns
+the rows it holds — the truncated preview, or the whole inline series — plus `totalCount` and a
+`notice` enrichment naming the supplied canvas when there was one. It does **not** throw — the rows
+in hand are still useful. The `dataframe_query`/`dataframe_describe` tools throw
 `canvas_unavailable` (`ServiceUnavailable`) when invoked without DuckDB. This non-throwing
 degradation must NOT be added to `errors[]` — that contract is for thrown errors only.
 
@@ -653,8 +657,13 @@ read-only) against tables `openaq_get_measurements` staged (`measurements_<senso
 `dataframe_describe` lists staged tables + columns. Both throw `canvas_unavailable`
 (`ServiceUnavailable`) when `CANVAS_PROVIDER_TYPE` is not `duckdb`, and the framework's
 `missing_table` (`NotFound`, re-stage hint) / `register_as_clash` surface as-is. Schemas follow the
-skill's recipe verbatim (`canvas_id` + `sql` in, `rows` + `row_count` out for query; `canvas_id` in,
-`tables[]` out for describe) — no domain-specific fields.
+skill's recipe (`canvas_id` + `sql` in, `rows` + `rowCount` out for query; `canvas_id` in,
+`tables[]` out for describe), plus the response bound the recipe leaves to the consumer:
+`dataframe_query` passes an explicit 200-row `rowLimit` to `instance.query` and forwards the
+provider's `truncated` as an optional output field, with a `notice` naming
+`ORDER BY <column> LIMIT 200 OFFSET <n>` as the continuation. The four-layer SQL gate bounds what a
+statement may *do*, never how many rows it yields, so a `CROSS JOIN` over a staged series otherwise
+reaches the 10,000-row DuckDB ceiling and lands ~1.8 MB in one response.
 
 ---
 
@@ -670,14 +679,25 @@ skill's recipe verbatim (`canvas_id` + `sql` in, `rows` + `row_count` out for qu
 - **Too big to inline.** A multi-month raw (hourly-at-source) series is thousands of rows. Inlining
   blows context; a fixed slice blinds the agent to the rest. Spillover shows a preview + stages the
   full set.
-- **Spill mechanics:** acquire canvas (`canvas_id` optional input → mint on omit), stream the paged
-  measurements via `spillover()` (preview ≈ 100k chars ≈ 25k tokens), register as
-  `measurements_<sensorId>`. Output carries `canvasId`, `tableName`, `truncated`, plus the preview
-  `series` and `totalCount`. Reusing a `canvas_id` across two `get_measurements` calls stages a
-  second table (`measurements_<otherSensorId>`) so the agent can `JOIN`/`UNION` to compare stations.
-- **Mandatory pairing:** because `get_measurements` can emit a `canvasId`, the server ships
-  `openaq_dataframe_query` (+ `openaq_dataframe_describe`). A token with no query tool is dead
-  output.
+- **Staging mechanics:** acquire the canvas (`canvas_id` optional input → mint on omit), page the
+  measurements up to the row ceiling, register as `measurements_<sensorId>`. Staging runs whenever
+  the series overflows the 100-row inline preview **or** a `canvas_id` was supplied — a caller who
+  names a canvas is asking for this series on it, and a narrow range that silently skipped the
+  canvas left nothing to join against. With no `canvas_id` a series that fits inline touches no
+  canvas, so small calls burn no tenant canvas slot. Output carries `canvasId`, `tableName`,
+  `truncated`, `pulledCount`, `pullComplete`, plus the preview `series` and `totalCount`.
+- **One table per sensor.** The staged name is `measurements_<sensorId>` with no aggregation or
+  range component, and the handler drops that name before registering. Reusing a `canvas_id` for a
+  *different* sensor adds a table, so the agent can `JOIN`/`UNION` to compare stations; reusing it
+  for the *same* sensor at another aggregation or window overwrites the earlier series. The drop
+  reports whether it removed anything, and the staging notice says so when it did.
+- **Mandatory pairing, surfaced at runtime:** because `get_measurements` can emit a `canvasId`, the
+  server ships `openaq_dataframe_query` (+ `openaq_dataframe_describe`). A token with no query tool
+  is dead output — and a token whose response names no tool is nearly as dead, so the staging path
+  pushes a notice naming the staged table, `openaq_dataframe_describe`, then
+  `openaq_dataframe_query`. Describe-first is load-bearing, not ordering preference: the staged
+  table is flat (`min`, `sd`) while the response `series` is nested (`summary.min`), so SQL written
+  from the response shape alone references columns that do not exist.
 - **Graceful degradation:** without `CANVAS_PROVIDER_TYPE=duckdb`, `get_measurements` returns the
   truncated preview + `totalCount` and omits the canvas fields (the `canvas_unavailable` contract
   documents this); the dataframe tools throw `canvas_unavailable` with an enable hint.
@@ -694,7 +714,7 @@ non-truncated result):
 |:-----|:--------------------|:-----------------------------------|
 | `openaq_find_locations` | `totalCount` (total matching stations, via `ctx.enrich.total`) | `truncated` / `shown` / `cap` (via `ctx.enrich.truncated` when `limit` hit) |
 | `openaq_get_readings` | — (returns all sensors at one location; not a capped list) | — |
-| `openaq_get_measurements` | `totalCount` (total rows in the full series) | `truncated` (series spilled; also a top-level output field) |
+| `openaq_get_measurements` | `totalCount` (rows in the full series; a floor when the pull stopped early and OpenAQ gave `">N"`) | `totalCountIsLowerBound` (that floor case), `notice` (row cap, failed page, canvas unavailable, or where the series was staged) |
 | `openaq_list_parameters` | `totalCount` | `notice` when `query` matches nothing |
 | `openaq_list_countries` | `totalCount` | `notice` when `query` matches nothing |
 
@@ -706,8 +726,13 @@ blind).
 
 `format()` for every tool renders all output fields (value **and** unit on every reading, the
 `measured` framing line, `datetimeLast`, the canvas hint) so `content[]`-only clients (Claude
-Desktop) see the same picture as `structuredContent` clients (Claude Code). The `capped-list-no-truncation`
-linter enforces disclosure on `find_locations` and `get_measurements`.
+Desktop) see the same picture as `structuredContent` clients (Claude Code). That includes the
+**rows**: a formatter that renders a slice of an array the response carries in full leaves the two
+clients reasoning over different samples of the same call, and the omitted rows are response data,
+not display metadata. So `get_measurements` renders all `PREVIEW_ROWS` of `series` and
+`dataframe_query` renders every row inside its 200-row cap — the bounded set is built once and
+projected onto both surfaces. The `capped-list-no-truncation` linter enforces disclosure on
+`find_locations` and `get_measurements`; `format-parity` enforces the field-level half.
 
 ---
 
@@ -828,10 +853,14 @@ Countries:    GET /v3/countries
 ### Response envelope
 
 All list endpoints wrap results in `{ "meta": { "page", "limit", "found" }, "results": [...] }`.
-`meta.found` is a number for bounded sets, or a string like `">2"` when more pages exist. The
-service must parse this: `typeof found === 'number' ? found : Infinity` (or extract the trailing
-number for display). Pass the resolved value to `ctx.enrich.total()` — passing the raw string would
-poison the `totalCount` field. Pagination is `page` + `limit` (1-based).
+`meta.found` is a number for bounded sets, or a string like `">2"` when more pages exist. Passing
+the raw string to `ctx.enrich.total()` would poison the `totalCount` field, so the service resolves
+it with `interpretFound` → `{ total, isLowerBound }`: the digits are a **floor**, never an exact
+total, and the flag says which it is. The value is never collapsed to `Infinity` — that cannot be
+published to a caller, and treating it as a sentinel to fall back from is what made an incomplete
+pull report its own row count as the series total. A caller that exhausts the range ignores
+`meta.found` entirely: its own count is exact.
+Pagination is `page` + `limit` (1-based).
 
 ### Error envelope (live-probed)
 
@@ -915,6 +944,10 @@ live (not hardcoded) so new parameters appear automatically; this table document
 | 2026-06-13 | **No prompts.** | Data-lookup domain; no recurring analysis template. The health-snapshot idea is a cross-server workflow, deliberately not localized here. |
 | 2026-06-13 | **Identity is the hyphenated `openaq-mcp-server` everywhere** (createApp `title`, manifest `display_name`); never Title Case. `name`+`title` only in createApp — no `description`/`websiteUrl` duplication. | Fleet identity rule: machine name on every surface; Title Case is a strong agent prior to strike. `description` derives from `package.json`. |
 | 2026-06-13 | **Framework held at `@cyanheads/mcp-ts-core` ^0.10.6** — not bumped. | The design targets the pinned framework version; upgrades are handled deliberately, out of band. |
+| 2026-09-22 | **`dataframe_query` caps responses at 200 rows**, forwarding the provider's `truncated` and naming `ORDER BY <column> LIMIT 200 OFFSET <n>` as the continuation. No `nextOffset` output field. | The 10,000-row canvas default is a DuckDB ceiling, not a response budget: a `CROSS JOIN` over a staged series reached it at ~1.8 MB. 200 keeps the widest staged row shape near 37 KB. `LIMIT`/`OFFSET` is the idiom for a SQL surface and already works, and a server-computed offset would promise an ordering the tool cannot guarantee. Capping and disclosing teaches more than rejecting an unbounded query. |
+| 2026-09-22 | **`format()` renders every row the response carries**, on both `get_measurements` and `dataframe_query`. The bounded set is built once and projected onto both surfaces. | Row slices in `format()` (20 of 100, 50 of N) left a text-only client and a structured-content client reasoning over different samples of the same call. Omitted rows are response data, not display metadata, and with DataCanvas off there is no retrieval path for them at all. The cost is bounded by the preview and the query cap, which already exist. |
+| 2026-09-22 | **A supplied `canvas_id` stages the series whatever its size**; omitting it leaves a series that fits inline touching no canvas. | Reading the id only inside the overflow branch discarded it silently on a narrow range — the caller got no `canvasId`, no error, and nothing to join against, while the same bad id on a wide range raised `canvas_not_found`. The verdict on an id must not depend on the result size. Minting on every small call instead would burn tenant canvas slots for nothing. |
+| 2026-09-22 | **A re-stage that replaced an earlier table says so** in the staging notice, rather than changing the `measurements_<sensorId>` naming. | One table per sensor keeps re-staging the same pull idempotent, which is the common case. The cost is that the same sensor at another aggregation or window silently replaced the earlier series while the docs described reuse as additive. `drop()` already reports whether it removed a table, so the replacement is disclosed at no structural cost. |
 
 ---
 
@@ -953,7 +986,7 @@ _Independent review pass — 2026-06-13. All changes verified against the live A
 | 4 | Data model comment: `distance` field in bbox results | Comment said "present ONLY when coordinates+radius given (absent/null for bbox)" — live probe shows the key IS present in bbox results, with value `null`. | Corrected to "present always, null when no center point (bbox / iso queries)". |
 | 5 | `openaq_get_measurements` error contract: `canvas_unavailable` | Listed in `errors[]` as a thrown error, but the design text immediately below said "the handler still returns the truncated preview … rather than throwing." An `errors[]` entry is for thrown errors; a non-throwing entry is a contract lie that would confuse implementors and `tools/list` consumers. | Removed `canvas_unavailable` from `errors[]`. Replaced with a plaintext note explaining the degraded-mode behavior (returns preview + `notice` enrichment; never throws). The `dataframe_*` tools still throw `canvas_unavailable` when invoked without DuckDB — that's correct and unchanged. |
 | 6 | 422 error envelope documentation | Described body as `[{ "type": "...", ... }]` (Pydantic JSON array). Live probe: actual body is `"[{'type': '...', ...}]"` — a **JSON string wrapping a Python `repr`** (single-quoted dicts, not valid JSON). `JSON.parse(body)` gives a `string`, not an array. | Updated error table and resilience row to call out the body format and require regex extraction of `msg` instead of JSON parsing. |
-| 7 | `meta.found` handling: `totalCount` | Note said "treat `>N` as there are more" without specifying how the service should derive `totalCount`. Passing the raw string `">2"` to `ctx.enrich.total()` would poison the field. | Added explicit parse rule: `typeof found === 'number' ? found : Infinity` (or strip leading `>`). |
+| 7 | `meta.found` handling: `totalCount` | Note said "treat `>N` as there are more" without specifying how the service should derive `totalCount`. Passing the raw string `">2"` to `ctx.enrich.total()` would poison the field. | Added explicit parse rule: `typeof found === 'number' ? found : Infinity` (or strip leading `>`). Superseded 2026-09-22 — see "Response envelope": the digits are a floor plus a lower-bound flag, never `Infinity`. |
 | 8 | `openaq_get_readings` sensorId describe: typo | `'Sensor id — pass to openaq_get_measurements territory via locationId+parametersId for this sensor\'s history'` — "territory via" is garbled. | Reworded to `'Sensor id — use the corresponding locationId + parametersId to fetch this sensor\'s history via openaq_get_measurements'`. |
 
 ### Verified correct (no change needed)

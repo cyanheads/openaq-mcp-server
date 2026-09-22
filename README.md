@@ -80,8 +80,9 @@ All resource data is also reachable via tools — both resources mirror tool out
 - `aggregation`: `raw` (every reported value), `hourly`, or `daily` — rollups add a per-bucket min/median/max/mean/sd
 - `datetimeFrom`/`datetimeTo` accept a date (`YYYY-MM-DD`) or full UTC timestamp; omit either for the most recent values or "up to now"
 - Values carry their unit; the server never converts between µg/m³, ppm, and ppb
-- Internal paging caps at 5000 rows; past the 100-row inline preview, pulled rows stage on a DataCanvas (`canvasId` + `tableName`) when `CANVAS_PROVIDER_TYPE=duckdb` — without it, the response still returns the truncated preview plus a notice
-- Pass a prior `canvas_id` to stage a second station's series on the same canvas, for cross-station `JOIN`/`UNION` queries
+- Internal paging caps at 5000 rows and also stops on a failed page — `pulledCount` and `pullComplete` say what was actually collected, and `totalCount` is published as a floor (flagged by `totalCountIsLowerBound`) when OpenAQ answers the range with a `">N"` bound instead of an exact count
+- Past the 100-row inline preview, `series` is a preview and the pulled rows stage on a DataCanvas (`canvasId` + `tableName`) when `CANVAS_PROVIDER_TYPE=duckdb` — without it, the response still returns the preview plus a notice. Every row the response carries is rendered in the text output too, so a text-only client sees the same set
+- Pass a prior `canvas_id` to put this series on that canvas whatever its size, for cross-station `JOIN`/`UNION` queries. Reuse stages one table per sensor: a different sensor adds a table, while re-staging the same sensor overwrites its earlier series and the response says so
 
 ---
 
@@ -103,7 +104,7 @@ All resource data is also reachable via tools — both resources mirror tool out
 
 ### `openaq_dataframe_describe` <sub>tool</sub>
 
-- Takes a `canvas_id` from a prior `openaq_get_measurements` spill
+- Takes a `canvas_id` returned by a prior `openaq_get_measurements` call
 - Returns each staged `measurements_<sensorId>` table with its row count and column names
 - Throws `canvas_unavailable` when `CANVAS_PROVIDER_TYPE` is not `duckdb`
 
@@ -113,6 +114,7 @@ All resource data is also reachable via tools — both resources mirror tool out
 
 - Takes a `canvas_id` and a read-only SQL `SELECT` against the staged measurement tables
 - Writes, DDL, and file/network table functions are rejected — only a single `SELECT` runs
+- Responses carry at most 200 rows whatever the SQL shape; `truncated` reports that the cap bit, and the notice names `ORDER BY <column> LIMIT 200 OFFSET <n>` as the way to page the rest. `rowCount` is the rows returned, not the size of the full result
 - Throws `canvas_unavailable` when DuckDB is off, or `missing_table` when the SQL references a table not staged on that canvas
 
 ---
@@ -132,14 +134,16 @@ All resource data is also reachable via tools — both resources mirror tool out
 
 ## DataCanvas spill workflow
 
-A multi-month `raw` series can be thousands of rows — too large to inline without blowing context. When `openaq_get_measurements` spills, query the staged table with the two consumer tools:
+A multi-month `raw` series can be thousands of rows — too large to inline without blowing context. When `openaq_get_measurements` stages a series, read the staged table with the two consumer tools, in this order:
 
 | Tool | Use |
 |:---|:---|
-| `openaq_dataframe_describe` | List staged tables and their columns (`value`, `datetimeFrom`, `datetimeTo`, `min`, `median`, `max`, `avg`, `sd`, `percentComplete`, `flagged`) — call first to write SQL without guessing names. |
-| `openaq_dataframe_query` | Run a read-only `SELECT` for monthly means, exceedance counts, percentiles, or cross-sensor comparisons. |
+| `openaq_dataframe_describe` | List staged tables and their columns (`value`, `datetimeFrom`, `datetimeTo`, `min`, `median`, `max`, `avg`, `sd`, `percentComplete`, `flagged`) — call first. The staged table is flat while the inline `series` is nested (`summary.min`), so SQL written from the response shape alone names columns that do not exist. |
+| `openaq_dataframe_query` | Run a read-only `SELECT` for monthly means, exceedance counts, percentiles, or cross-sensor comparisons. Capped at 200 rows per response — aggregate in SQL, or page with `ORDER BY` plus `LIMIT`/`OFFSET`. |
 
-- Requires `CANVAS_PROVIDER_TYPE=duckdb`. Without it — or when a configured canvas fails to start — `openaq_get_measurements` still returns the truncated preview plus a notice rather than dropping data already fetched.
+- The staging response names both tools and the table it wrote, so the handle is never opaque.
+- One table per sensor (`measurements_<sensorId>`): reuse a `canvas_id` across two sensors to `JOIN`/`UNION` their series, and re-staging the same sensor overwrites its earlier table.
+- Requires `CANVAS_PROVIDER_TYPE=duckdb`. Without it — or when a configured canvas fails to start — `openaq_get_measurements` still returns the preview plus a notice rather than dropping data already fetched.
 - Not available in the `.mcpb` bundle — the Claude Desktop bundle ships without DuckDB's platform-specific native binding, since bundling it would lock the bundle to the OS it was packed on. Use the npm, `npx`, or Docker install for canvas work.
 
 ## Features
