@@ -75,7 +75,7 @@ Both resources mirror tool output, so tool-only clients lose nothing.
 - `locationId` and `parametersId` required; `datetimeFrom`/`datetimeTo` take a UTC timestamp, sent as is, or a `YYYY-MM-DD` date, read as the station's local calendar day (a UTC day when OpenAQ lists no timezone); `aggregation` is `raw` (default), `hourly`, or `daily`, and rollups add min/median/max/avg/sd per bucket. Pulls up to 5,000 rows per call
 - Returns `series` with `sensorId`, `pulledCount`, and `pullComplete`, and a `location` carrying `provider`, `providerId`, and `timezone`; `totalCount` is a floor when `totalCountIsLowerBound` is set
 - `effectiveRange` echoes the UTC bounds sent upstream. Hourly and daily responses add `gapCount` and the first 20 missing intervals as `gaps`, and the notice flags an edge bucket the range clips
-- Past 100 rows, `series` is a preview (`truncated`) and the pulled rows stage on a DataCanvas as `measurements_<sensorId>` (`canvasId`, `tableName`) when `CANVAS_PROVIDER_TYPE=duckdb`; a supplied `canvas_id` stages onto that canvas at any size
+- Past 100 rows, `series` is a preview (`truncated`) and the pulled rows stage on a DataCanvas as `measurements_<sensorId>` (`canvasId`, `tableName`) when `CANVAS_PROVIDER_TYPE=duckdb`; a supplied `canvas_id` stages onto that canvas at any size. One table per sensor: a second sensor adds a table to join against, and re-staging the same sensor overwrites its earlier series
 
 ---
 
@@ -95,7 +95,7 @@ Both resources mirror tool output, so tool-only clients lose nothing.
 
 ### `openaq_dataframe_describe` <sub>tool</sub>
 
-- Takes a `canvas_id` from `openaq_get_measurements` and returns each staged table's `name`, `rowCount`, and `columns`
+- Takes a `canvas_id` from `openaq_get_measurements` and returns each staged table's `name`, `rowCount`, and `columns`. Call it before `openaq_dataframe_query`: the staged table is flat (`min`, `sd`) while the inline `series` nests those under `summary`
 - Fails as `canvas_unavailable` unless `CANVAS_PROVIDER_TYPE=duckdb`, or `canvas_not_found` for an unknown or expired id
 
 ---
