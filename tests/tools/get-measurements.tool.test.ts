@@ -20,16 +20,19 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getMeasurements } from '@/mcp-server/tools/definitions/get-measurements.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
-import type { MeasurementsPage } from '@/services/openaq/openaq-service.js';
+import type { MeasurementsPage, MeasurementsParams } from '@/services/openaq/openaq-service.js';
 import { setOpenAqService } from '@/services/openaq/openaq-service.js';
 import type { OpenAqMeasurement } from '@/services/openaq/types.js';
 import {
   dailyMeasurement,
+  dstBoundaries,
   gapBucketHourly,
   impreciseDaily,
+  makeBucket,
   rawMeasurement,
   seattleLocation,
   singleReadingHourly,
+  sparseLocation,
 } from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
 
@@ -58,9 +61,17 @@ const fullPage = (
   foundIsLowerBound,
 });
 
+/** Provenance fields every `location` output carries, for hand-built `format()` inputs. */
+const stationMeta = { provider: 'AirNow', providerId: 119, timezone: 'America/Los_Angeles' };
+
 /** The text of the single block `format()` returns. */
 const formatText = (result: Parameters<NonNullable<typeof getMeasurements.format>>[0]): string =>
   (getMeasurements.format!(result)[0] as { text: string }).text;
+
+/** Every OpenAQ call goes through a stub; a path that reaches the network fails loudly. */
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch in a unit test'));
+});
 
 afterEach(() => {
   setOpenAqService(undefined as never);
@@ -241,7 +252,7 @@ describe('openaq_get_measurements', () => {
 
   it('format renders location id, parameter id, aggregation, and the spill pointer', () => {
     const blocks = getMeasurements.format!({
-      location: { id: 931, name: 'Seattle' },
+      location: { id: 931, name: 'Seattle', ...stationMeta },
       parameter: { id: 2, name: 'pm25', unit: 'µg/m³', displayName: 'PM2.5' },
       sensorId: 1701,
       aggregation: 'daily',
@@ -297,7 +308,7 @@ describe('openaq_get_measurements gap buckets (#11)', () => {
 
   it('renders a gap bucket as "no data" with no unit, and keeps its coverage', () => {
     const text = formatText({
-      location: { id: 1938, name: 'Seattle-Beacon Hill' },
+      location: { id: 1938, name: 'Seattle-Beacon Hill', ...stationMeta },
       parameter: { id: 2, name: 'pm25', unit: 'µg/m³', displayName: 'PM2.5' },
       sensorId: 3425,
       aggregation: 'hourly',
@@ -395,7 +406,7 @@ describe('openaq_get_measurements date-range normalization (#6)', () => {
     return seen;
   };
 
-  it('accepts a same-day range given as timestamp → date, expanding the date to end of day', async () => {
+  it('accepts a same-day range given as timestamp → date, expanding the date to the end of the station-local day', async () => {
     const seen = recordingStub();
     const result = await getMeasurements.handler(
       getMeasurements.input.parse({
@@ -408,13 +419,15 @@ describe('openaq_get_measurements date-range normalization (#6)', () => {
       ctxWith(),
     );
     expect(result.series).toHaveLength(1);
+    // The explicit timestamp passes through; the date closes at the next local
+    // midnight in America/Los_Angeles (PDT, UTC-7).
     expect(seen).toEqual({
       datetimeFrom: '2026-06-25T00:00:00Z',
-      datetimeTo: '2026-06-25T23:59:59Z',
+      datetimeTo: '2026-06-26T07:00:00Z',
     });
   });
 
-  it('accepts a same-day date-only range as a full day', async () => {
+  it('accepts a same-day date-only range as a full station-local day', async () => {
     const seen = recordingStub();
     await getMeasurements.handler(
       getMeasurements.input.parse({
@@ -427,8 +440,8 @@ describe('openaq_get_measurements date-range normalization (#6)', () => {
       ctxWith(),
     );
     expect(seen).toEqual({
-      datetimeFrom: '2026-06-25T00:00:00Z',
-      datetimeTo: '2026-06-25T23:59:59Z',
+      datetimeFrom: '2026-06-25T07:00:00Z',
+      datetimeTo: '2026-06-26T07:00:00Z',
     });
   });
 
@@ -454,7 +467,8 @@ describe('openaq_get_measurements date-range normalization (#6)', () => {
       code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'invalid_date_range',
-        datetimeFrom: '2026-06-25T00:00:00Z',
+        // The date opens at local midnight (07:00Z), already past the timestamp.
+        datetimeFrom: '2026-06-25T07:00:00Z',
         datetimeTo: '2026-06-25T00:00:00Z',
       },
     });
@@ -873,7 +887,7 @@ describe('openaq_get_measurements honours a supplied canvas_id at any size (#35)
 
   it('names the canvas and table in content[] on a staged-but-not-truncated response', () => {
     const text = formatText({
-      location: { id: 931, name: 'Seattle-10th & Weller' },
+      location: { id: 931, name: 'Seattle-10th & Weller', ...stationMeta },
       parameter: { id: 2, name: 'pm25', unit: 'µg/m³', displayName: 'PM2.5' },
       sensorId: 1701,
       aggregation: 'daily',
@@ -1054,7 +1068,7 @@ describe('openaq_get_measurements points at the dataframe tools when it stages (
 
 describe('openaq_get_measurements format row accounting (#15) and rounding (#10)', () => {
   const previewResult = (rows: number, truncated: boolean) => ({
-    location: { id: 1938, name: 'Seattle-Beacon Hill' },
+    location: { id: 1938, name: 'Seattle-Beacon Hill', ...stationMeta },
     parameter: { id: 2, name: 'pm25', unit: 'µg/m³', displayName: 'PM2.5' },
     sensorId: 3425,
     aggregation: 'hourly' as const,
@@ -1234,5 +1248,1045 @@ describe('openaq_get_measurements id inputs must be positive (#33)', () => {
       locationId: 1,
       parametersId: 1,
     });
+  });
+});
+
+/** The text of every text block on a wire result, joined. */
+const wireText = (result: Awaited<ReturnType<typeof runToolContract>>): string =>
+  result.content.map((block) => (block.type === 'text' ? block.text : '')).join('\n');
+
+/** `structuredContent` of a wire result, loosely typed for field assertions. */
+const structured = (result: Awaited<ReturnType<typeof runToolContract>>) =>
+  result.structuredContent as Record<string, unknown> & {
+    effectiveRange?: { datetimeFrom: string | null; datetimeTo: string | null };
+    gapCount?: number;
+    gaps?: { datetimeFrom: string; datetimeTo: string }[];
+    location: Record<string, unknown>;
+    notice?: string;
+  };
+
+/** Buckets from `[datetimeFrom, datetimeTo]` UTC pairs. */
+const bucketsFrom = (
+  pairs: readonly (readonly [string, string])[],
+  opts?: Parameters<typeof makeBucket>[2],
+): OpenAqMeasurement[] => pairs.map(([from, to]) => makeBucket(from, to, opts));
+
+/** Hourly buckets for each UTC start hour given as `YYYY-MM-DDTHH`. */
+const hourlyAt = (starts: string[]): OpenAqMeasurement[] =>
+  starts.map((s) => {
+    const from = `${s}:00:00Z`;
+    const to = new Date(Date.parse(from) + 3_600_000).toISOString().replace('.000Z', 'Z');
+    return makeBucket(from, to);
+  });
+
+/**
+ * Serves `rows` as one page and records every measurements request, so a test can
+ * assert the bounds forwarded upstream and how many requests went out.
+ */
+const serveRows = (rows: OpenAqMeasurement[], location = seattleLocation) => {
+  const calls: MeasurementsParams[] = [];
+  const getLocation = vi.fn(async () => location);
+  installStubService({
+    getLocation,
+    getMeasurements: async (_sensorId, params) => {
+      calls.push(params);
+      return onePage(rows);
+    },
+  });
+  return { calls, getLocation };
+};
+
+describe('openaq_get_measurements location provenance (#30)', () => {
+  it('keeps the station id and name, falling back to "location <id>" for an unnamed station', async () => {
+    serveRows([dailyMeasurement]);
+    const named = await getMeasurements.handler(
+      getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation: 'daily' }),
+      ctxWith(),
+    );
+    expect(named.location).toMatchObject({ id: 931, name: 'Seattle-10th & Weller' });
+
+    serveRows([dailyMeasurement], sparseLocation);
+    const unnamed = await getMeasurements.handler(
+      getMeasurements.input.parse({ locationId: 42, parametersId: 2, aggregation: 'daily' }),
+      ctxWith(),
+    );
+    expect(unnamed.location).toMatchObject({ id: 42, name: 'location 42' });
+  });
+
+  it('returns provider, providerId, and timezone on both surfaces', async () => {
+    serveRows([dailyMeasurement]);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured(result).location).toEqual({
+      id: 931,
+      name: 'Seattle-10th & Weller',
+      provider: 'AirNow',
+      providerId: 119,
+      timezone: 'America/Los_Angeles',
+    });
+    const text = wireText(result);
+    expect(text).toContain('AirNow');
+    expect(text).toContain('119');
+    expect(text).toContain('America/Los_Angeles');
+  });
+
+  it('yields null provider, providerId, and timezone when OpenAQ lists none — never "Unknown"', async () => {
+    serveRows([dailyMeasurement], { ...seattleLocation, provider: null, timezone: null });
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(structured(result).location).toMatchObject({
+      provider: null,
+      providerId: null,
+      timezone: null,
+    });
+    const text = wireText(result);
+    expect(text).not.toMatch(/unknown/i);
+    expect(text).not.toContain('null');
+  });
+
+  it('adds no upstream request: one location lookup plus one per page', async () => {
+    const { calls, getLocation } = serveRows([dailyMeasurement]);
+    await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-05-01',
+      datetimeTo: '2026-05-01',
+    });
+
+    expect(getLocation).toHaveBeenCalledTimes(1);
+    expect(calls).toHaveLength(1);
+  });
+});
+
+describe('openaq_get_measurements date-only bounds are station-local days (#29)', () => {
+  it('reads a same-day daily range as exactly one local day and echoes the bounds sent', async () => {
+    const { calls } = serveRows(
+      bucketsFrom([['2026-08-01T07:00:00Z', '2026-08-02T07:00:00Z']], { label: '1 day' }),
+    );
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-08-01',
+      datetimeTo: '2026-08-01',
+    });
+
+    expect(calls[0]).toMatchObject({
+      datetimeFrom: '2026-08-01T07:00:00Z',
+      datetimeTo: '2026-08-02T07:00:00Z',
+    });
+    const sc = structured(result);
+    expect(sc.effectiveRange).toEqual({
+      datetimeFrom: '2026-08-01T07:00:00Z',
+      datetimeTo: '2026-08-02T07:00:00Z',
+    });
+    expect(sc.gapCount).toBe(0);
+    expect(sc).not.toHaveProperty('gaps');
+    expect(sc).not.toHaveProperty('notice');
+    expect(wireText(result)).toMatch(
+      /Range sent to OpenAQ:\*\* 2026-08-01T07:00:00Z → 2026-08-02T07:00:00Z/,
+    );
+  });
+
+  it('closes a date-only raw day at the next local midnight, so the last hour is kept', async () => {
+    const rows = hourlyAt(
+      Array.from({ length: 24 }, (_, h) =>
+        new Date(Date.parse('2026-08-03T07:00:00Z') + h * 3_600_000).toISOString().slice(0, 13),
+      ),
+    );
+    const { calls } = serveRows(rows);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'raw',
+      datetimeFrom: '2026-08-03',
+      datetimeTo: '2026-08-03',
+    });
+
+    expect(calls[0]).toMatchObject({
+      datetimeFrom: '2026-08-03T07:00:00Z',
+      datetimeTo: '2026-08-04T07:00:00Z',
+    });
+    const sc = structured(result);
+    expect(sc.rowCount).toBe(24);
+    expect((sc.series as { datetimeTo: string }[]).at(-1)?.datetimeTo).toBe('2026-08-04T07:00:00Z');
+  });
+
+  it('passes explicit timestamps through unchanged', async () => {
+    const { calls } = serveRows(hourlyAt(['2026-08-08T07']));
+    await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'hourly',
+      datetimeFrom: '2026-08-08T07:00:00Z',
+      datetimeTo: '2026-08-10T07:00:00Z',
+    });
+    expect(calls[0]).toMatchObject({
+      datetimeFrom: '2026-08-08T07:00:00Z',
+      datetimeTo: '2026-08-10T07:00:00Z',
+    });
+  });
+
+  it('echoes an omitted bound as null', async () => {
+    const { calls } = serveRows([dailyMeasurement]);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-05-01',
+    });
+    expect(calls[0]).not.toHaveProperty('datetimeTo');
+    expect(structured(result).effectiveRange).toEqual({
+      datetimeFrom: '2026-05-01T07:00:00Z',
+      datetimeTo: null,
+    });
+  });
+
+  /**
+   * Each case is a local calendar day and the UTC instants that open and close it.
+   * Southern-hemisphere, half-hour, and midnight-transition zones are here because
+   * a fixed-offset or single-lookup conversion gets them wrong. The conversion reads
+   * only the station zone, so the expectations hold under any process TZ.
+   */
+  it.each([
+    ['America/Los_Angeles', '2026-08-01', '2026-08-01T07:00:00Z', '2026-08-02T07:00:00Z'],
+    // Fall back: 25-hour day. Spring forward: 23-hour day.
+    ['America/Los_Angeles', '2025-11-02', '2025-11-02T07:00:00Z', '2025-11-03T08:00:00Z'],
+    ['America/Los_Angeles', '2026-03-08', '2026-03-08T08:00:00Z', '2026-03-09T07:00:00Z'],
+    ['Europe/Berlin', '2026-03-29', '2026-03-28T23:00:00Z', '2026-03-29T22:00:00Z'],
+    ['Europe/Berlin', '2025-10-26', '2025-10-25T22:00:00Z', '2025-10-26T23:00:00Z'],
+    ['Asia/Kolkata', '2026-08-01', '2026-07-31T18:30:00Z', '2026-08-01T18:30:00Z'],
+    ['Australia/Sydney', '2026-04-05', '2026-04-04T13:00:00Z', '2026-04-05T14:00:00Z'],
+    // Chile moves its clocks at midnight: on 2026-09-06 local midnight never
+    // happens (the day opens at 01:00), and on 2026-04-05 23:00 repeats first.
+    ['America/Santiago', '2026-09-06', '2026-09-06T04:00:00Z', '2026-09-07T03:00:00Z'],
+    ['America/Santiago', '2026-04-05', '2026-04-05T04:00:00Z', '2026-04-06T04:00:00Z'],
+  ])('opens and closes %s day %s at local midnight', async (timezone, day, from, to) => {
+    const { calls } = serveRows([dailyMeasurement], { ...seattleLocation, timezone });
+    await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: day,
+      datetimeTo: day,
+    });
+    expect(calls[0]).toMatchObject({ datetimeFrom: from, datetimeTo: to });
+  });
+
+  it('falls back to UTC days with a notice when the station has no timezone', async () => {
+    const { calls } = serveRows([dailyMeasurement], sparseLocation);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 42,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-08-01',
+      datetimeTo: '2026-08-01',
+    });
+
+    expect(calls[0]).toMatchObject({
+      datetimeFrom: '2026-08-01T00:00:00Z',
+      datetimeTo: '2026-08-02T00:00:00Z',
+    });
+    const sc = structured(result);
+    expect(sc.location).toMatchObject({ timezone: null });
+    expect(sc.notice).toMatch(/no timezone for station 42.*UTC days/s);
+    expect(wireText(result)).toMatch(/no timezone for station 42/);
+  });
+
+  it('falls back the same way on a timezone the runtime does not recognize, naming it', async () => {
+    const { calls } = serveRows([dailyMeasurement], {
+      ...seattleLocation,
+      timezone: 'Mars/Olympus_Mons',
+    });
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-08-01',
+      datetimeTo: '2026-08-01',
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(calls[0]).toMatchObject({
+      datetimeFrom: '2026-08-01T00:00:00Z',
+      datetimeTo: '2026-08-02T00:00:00Z',
+    });
+    expect(structured(result).notice).toMatch(/Mars\/Olympus_Mons.*UTC days/s);
+  });
+
+  it('says nothing about the timezone when no bound is date-only', async () => {
+    serveRows([dailyMeasurement], sparseLocation);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 42,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-05-01T07:00:00Z',
+      datetimeTo: '2026-05-02T07:00:00Z',
+    });
+    expect(structured(result).notice ?? '').not.toMatch(/timezone/);
+  });
+
+  it('still rejects an inverted mixed pair before any measurements request', async () => {
+    const getMeasurementsSpy = vi.fn(async () => onePage([dailyMeasurement]));
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: getMeasurementsSpy,
+    });
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      datetimeFrom: '2026-06-25',
+      datetimeTo: '2026-06-25T06:59:59Z',
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'invalid_date_range' } },
+    });
+    expect(getMeasurementsSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects an inverted same-form pair with no request at all', async () => {
+    const getLocation = vi.fn(async () => seattleLocation);
+    const getMeasurementsSpy = vi.fn(async () => onePage([dailyMeasurement]));
+    installStubService({ getLocation, getMeasurements: getMeasurementsSpy });
+    for (const [datetimeFrom, datetimeTo] of [
+      ['2026-06-02', '2026-06-01'],
+      ['2026-06-01T07:00:00Z', '2026-06-01T07:00:00Z'],
+    ]) {
+      const result = await runToolContract(getMeasurements, {
+        locationId: 931,
+        parametersId: 2,
+        datetimeFrom,
+        datetimeTo,
+      });
+      expect(result.structuredContent).toMatchObject({
+        error: { data: { reason: 'invalid_date_range' } },
+      });
+    }
+    expect(getLocation).not.toHaveBeenCalled();
+    expect(getMeasurementsSpy).not.toHaveBeenCalled();
+  });
+
+  it('names the station timezone on daily output', async () => {
+    serveRows([dailyMeasurement]);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+    });
+    expect(wireText(result)).toMatch(/local calendar days in America\/Los_Angeles/);
+  });
+});
+
+describe('openaq_get_measurements clipped edge buckets (#29)', () => {
+  it('flags a first bucket that opens before an explicit datetimeFrom', async () => {
+    serveRows(
+      bucketsFrom(
+        [
+          ['2026-07-31T07:00:00Z', '2026-08-01T07:00:00Z'],
+          ['2026-08-01T07:00:00Z', '2026-08-02T07:00:00Z'],
+        ],
+        { label: '1 day' },
+      ),
+    );
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-08-01T00:00:00Z',
+      datetimeTo: '2026-08-01',
+    });
+
+    const sc = structured(result);
+    expect(sc.notice).toMatch(
+      /first bucket \(2026-07-31T07:00:00Z → 2026-08-01T07:00:00Z\) starts before datetimeFrom/,
+    );
+    expect(sc.notice).toMatch(/only the hours inside the range/);
+    expect(sc.notice).not.toMatch(/last bucket/);
+    expect(wireText(result)).toMatch(/starts before datetimeFrom/);
+  });
+
+  it('flags a last bucket that closes after an explicit datetimeTo', async () => {
+    serveRows(bucketsFrom([['2026-08-01T07:00:00Z', '2026-08-02T07:00:00Z']], { label: '1 day' }));
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-08-01',
+      datetimeTo: '2026-08-01T23:59:59Z',
+    });
+    const notice = structured(result).notice as string;
+    expect(notice).toMatch(
+      /last bucket \(2026-08-01T07:00:00Z → 2026-08-02T07:00:00Z\) ends after datetimeTo/,
+    );
+    expect(notice).not.toMatch(/first bucket/);
+  });
+
+  it('never flags raw rows', async () => {
+    serveRows(hourlyAt(['2026-07-31T23', '2026-08-01T00']));
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'raw',
+      datetimeFrom: '2026-08-01T00:00:00Z',
+      datetimeTo: '2026-08-01T00:30:00Z',
+    });
+    expect(structured(result).notice ?? '').not.toMatch(/bucket/);
+  });
+});
+
+describe('openaq_get_measurements missing intervals (#29)', () => {
+  const run = async (
+    rows: OpenAqMeasurement[],
+    aggregation: 'raw' | 'hourly' | 'daily',
+    range: { datetimeFrom?: string; datetimeTo?: string } = {},
+  ) => {
+    serveRows(rows);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation,
+      ...range,
+    });
+    expect(result.isError).toBeFalsy();
+    return { result, sc: structured(result), text: wireText(result) };
+  };
+
+  it('reports the missing local day in a ten-day daily range on both surfaces', async () => {
+    const days = [1, 2, 3, 4, 5, 6, 7, 8, 10].map((d) => {
+      const from = `2026-08-${String(d).padStart(2, '0')}T07:00:00Z`;
+      const to = new Date(Date.parse(from) + 86_400_000).toISOString().replace('.000Z', 'Z');
+      return [from, to] as const;
+    });
+    const { sc, text } = await run(bucketsFrom(days, { label: '1 day' }), 'daily', {
+      datetimeFrom: '2026-08-01',
+      datetimeTo: '2026-08-10',
+    });
+
+    expect(sc.rowCount).toBe(9);
+    expect(sc.effectiveRange).toEqual({
+      datetimeFrom: '2026-08-01T07:00:00Z',
+      datetimeTo: '2026-08-11T07:00:00Z',
+    });
+    expect(sc.gapCount).toBe(1);
+    expect(sc.gaps).toEqual([
+      { datetimeFrom: '2026-08-09T07:00:00Z', datetimeTo: '2026-08-10T07:00:00Z' },
+    ]);
+    expect(sc.notice).toMatch(/1 missing interval.*2026-08-09T07:00:00Z → 2026-08-10T07:00:00Z/s);
+    expect(text).toMatch(/1 missing interval/);
+    expect(text).toMatch(/- 2026-08-09T07:00:00Z → 2026-08-10T07:00:00Z/);
+  });
+
+  it('counts both skipped spans in an hourly window and ignores the uncovered tail', async () => {
+    const starts = [
+      ...[7, 8, 9, 10, 11, 12, 13, 14].map((h) => `2026-08-08T${String(h).padStart(2, '0')}`),
+      ...[20, 21, 22, 23].map((h) => `2026-08-08T${h}`),
+      ...[0, 1, 2, 4, 5].map((h) => `2026-08-09T0${h}`),
+    ];
+    const { sc } = await run(hourlyAt(starts), 'hourly', {
+      datetimeFrom: '2026-08-08T07:00:00Z',
+      datetimeTo: '2026-08-10T07:00:00Z',
+    });
+
+    expect(sc.rowCount).toBe(17);
+    expect(sc.gapCount).toBe(2);
+    expect(sc.gaps).toEqual([
+      { datetimeFrom: '2026-08-08T15:00:00Z', datetimeTo: '2026-08-08T20:00:00Z' },
+      { datetimeFrom: '2026-08-09T03:00:00Z', datetimeTo: '2026-08-09T04:00:00Z' },
+    ]);
+  });
+
+  it.each([
+    ['daily fall-back (25-hour day)', 'daily', dstBoundaries.dailyFallBack],
+    ['hourly fall-back (2-hour bucket)', 'hourly', dstBoundaries.hourlyFallBack],
+    ['hourly spring-forward', 'hourly', dstBoundaries.hourlySpringForward],
+    [
+      'daily spring-forward (overlapping buckets)',
+      'daily',
+      dstBoundaries.dailySpringForwardOverlap,
+    ],
+  ] as const)('finds no gap across a DST %s', async (_label, aggregation, pairs) => {
+    const { sc } = await run(bucketsFrom(pairs), aggregation);
+    expect(sc.gapCount).toBe(0);
+    expect(sc).not.toHaveProperty('gaps');
+  });
+
+  it('forwards the DST fall-back daily range as the 72 local hours it names', async () => {
+    const { calls } = serveRows(bucketsFrom(dstBoundaries.dailyFallBack, { label: '1 day' }));
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2025-11-01',
+      datetimeTo: '2025-11-03',
+    });
+    expect(calls[0]).toMatchObject({
+      datetimeFrom: '2025-11-01T07:00:00Z',
+      datetimeTo: '2025-11-04T08:00:00Z',
+    });
+    const sc = structured(result);
+    expect(sc.gapCount).toBe(0);
+    // The 25-hour bucket sits inside the local-day bounds, so nothing is clipped.
+    expect(sc).not.toHaveProperty('notice');
+  });
+
+  it('treats an overlap as covered in whatever order OpenAQ returns the rows', async () => {
+    const { sc } = await run(
+      bucketsFrom([
+        ['2026-03-08T08:00:00Z', '2026-03-09T07:00:00Z'],
+        ['2026-03-07T08:00:00Z', '2026-03-09T07:00:00Z'],
+      ]),
+      'daily',
+    );
+    expect(sc.gapCount).toBe(0);
+  });
+
+  it('counts a null-value bucket between two populated ones as one gap', async () => {
+    const { sc } = await run(
+      [
+        makeBucket('2026-08-08T07:00:00Z', '2026-08-08T08:00:00Z'),
+        makeBucket('2026-08-08T08:00:00Z', '2026-08-08T09:00:00Z', { value: null }),
+        makeBucket('2026-08-08T09:00:00Z', '2026-08-08T10:00:00Z'),
+      ],
+      'hourly',
+    );
+    expect(sc.gapCount).toBe(1);
+    expect(sc.gaps).toEqual([
+      { datetimeFrom: '2026-08-08T08:00:00Z', datetimeTo: '2026-08-08T09:00:00Z' },
+    ]);
+  });
+
+  it('merges a skipped hour and an adjacent null bucket into one span', async () => {
+    const { sc } = await run(
+      [
+        makeBucket('2026-08-08T07:00:00Z', '2026-08-08T08:00:00Z'),
+        makeBucket('2026-08-08T09:00:00Z', '2026-08-08T10:00:00Z', { value: null }),
+        makeBucket('2026-08-08T10:00:00Z', '2026-08-08T11:00:00Z', { value: null }),
+        makeBucket('2026-08-08T11:00:00Z', '2026-08-08T12:00:00Z'),
+      ],
+      'hourly',
+    );
+    expect(sc.gapCount).toBe(1);
+    expect(sc.gaps).toEqual([
+      { datetimeFrom: '2026-08-08T08:00:00Z', datetimeTo: '2026-08-08T11:00:00Z' },
+    ]);
+  });
+
+  it('keeps gapCount exact past the 20 listed spans', async () => {
+    // Every other hour present: 31 buckets, 30 one-hour gaps.
+    const starts = Array.from({ length: 31 }, (_, i) =>
+      new Date(Date.parse('2026-08-01T00:00:00Z') + i * 2 * 3_600_000).toISOString().slice(0, 13),
+    );
+    const { sc, text } = await run(hourlyAt(starts), 'hourly');
+
+    expect(sc.gapCount).toBe(30);
+    expect(sc.gaps).toHaveLength(20);
+    expect(sc.gaps?.[0]).toEqual({
+      datetimeFrom: '2026-08-01T01:00:00Z',
+      datetimeTo: '2026-08-01T02:00:00Z',
+    });
+    expect(sc.notice).toMatch(/30 missing intervals/);
+    expect(text).toMatch(/first 20 of 30/);
+  });
+
+  it('finds gaps in every pulled row, not only the inline preview', async () => {
+    // 150 every-other-hour buckets: the preview holds 100, the gaps run to row 150.
+    const starts = Array.from({ length: 150 }, (_, i) =>
+      new Date(Date.parse('2026-06-01T00:00:00Z') + i * 2 * 3_600_000).toISOString().slice(0, 13),
+    );
+    const { sc } = await run(hourlyAt(starts), 'hourly');
+
+    expect(sc.truncated).toBe(true);
+    expect(sc.rowCount).toBe(100);
+    expect(sc.gapCount).toBe(149);
+    expect(sc.notice).toMatch(/149 missing intervals/);
+    expect(sc.notice).toMatch(/DataCanvas is not enabled/);
+  });
+
+  it('sets gapCount 0 on a contiguous hourly series', async () => {
+    const { sc, text } = await run(hourlyAt(['2026-08-08T07', '2026-08-08T08']), 'hourly');
+    expect(sc.gapCount).toBe(0);
+    expect(sc).not.toHaveProperty('gaps');
+    expect(text).toMatch(/Missing intervals:\*\* 0/);
+  });
+
+  it('carries no gapCount or gaps on raw responses, however spaced the rows', async () => {
+    const { sc } = await run(hourlyAt(['2026-08-08T07', '2026-08-08T12']), 'raw');
+    expect(sc).not.toHaveProperty('gapCount');
+    expect(sc).not.toHaveProperty('gaps');
+  });
+});
+
+/**
+ * `ctx.enrich.notice` is last-wins, so every segment this tool can emit is
+ * composed into one string. Walk the canvas × preview × canvas_id × gap matrix
+ * and check that no arm contradicts another and none is dropped.
+ */
+describe('openaq_get_measurements notice composition across branches (#29)', () => {
+  const rowsFor = (overflow: boolean, gap: boolean) => {
+    const n = overflow ? 150 : 12;
+    const step = gap ? 2 : 1;
+    return hourlyAt(
+      Array.from({ length: n }, (_, i) =>
+        new Date(Date.parse('2026-06-01T00:00:00Z') + i * step * 3_600_000)
+          .toISOString()
+          .slice(0, 13),
+      ),
+    );
+  };
+
+  const stagingCanvas = () =>
+    setCanvas({
+      acquire: vi.fn(async (id?: string) => ({
+        canvasId: id ?? 'abc1234567',
+        isNew: id === undefined,
+        drop: vi.fn(async () => false),
+        registerTable: vi.fn(async (name: string, rows: unknown[]) => ({
+          tableName: name,
+          rowCount: rows.length,
+          columns: ['datetimeFrom', 'value'],
+        })),
+      })),
+    } as unknown as DataCanvas);
+
+  const cases = [false, true].flatMap((canvasOn) =>
+    [false, true].flatMap((overflow) =>
+      [false, true].flatMap((canvasId) =>
+        [false, true].map((gap) => ({ canvasOn, overflow, canvasId, gap })),
+      ),
+    ),
+  );
+
+  it.each(cases)(
+    'composes one coherent notice: %o',
+    async ({ canvasOn, overflow, canvasId, gap }) => {
+      serveRows(rowsFor(overflow, gap));
+      setCanvas(undefined);
+      if (canvasOn) stagingCanvas();
+      const result = await runToolContract(getMeasurements, {
+        locationId: 931,
+        parametersId: 2,
+        aggregation: 'hourly',
+        datetimeFrom: '2026-06-01T00:00:00Z',
+        ...(canvasId ? { canvas_id: 'abc1234567' } : {}),
+      });
+
+      expect(result.isError).toBeFalsy();
+      const sc = structured(result);
+      const notice = sc.notice ?? '';
+      const staged = canvasOn && (overflow || canvasId);
+
+      // The gap sentence appears exactly when gaps exist, once.
+      expect((notice.match(/missing interval/g) ?? []).length).toBe(gap ? 1 : 0);
+      expect(sc.gapCount).toBe(gap ? (overflow ? 149 : 11) : 0);
+      // Staging and not-staging never both appear.
+      expect(/staged on this canvas/.test(notice)).toBe(staged);
+      expect(/not enabled|could not stage/.test(notice)).toBe(!canvasOn && (overflow || canvasId));
+      // An inline series is never described as capped; an overflow without a canvas always is.
+      if (!overflow) expect(notice).not.toMatch(/capped at 100|Rows 101/);
+      if (overflow && !canvasOn) expect(notice).toMatch(/capped at 100 of 150 rows/);
+      // A named canvas is accounted for whenever it was not used.
+      if (canvasId && !canvasOn) expect(notice).toMatch(/Canvas abc1234567 could not be reused/);
+      // The pull finished, so nothing may call it incomplete.
+      expect(notice).not.toMatch(/not complete|partial/);
+      // No arm, no notice.
+      if (!gap && !staged && !(canvasId || overflow)) expect(sc).not.toHaveProperty('notice');
+      // Whatever the notice says, content[] says too.
+      if (notice) expect(wireText(result)).toContain(notice);
+    },
+  );
+
+  it('keeps every segment when all five fire at once, each once and in reading order', async () => {
+    // A station with no timezone, a first bucket straddling the UTC-day bound, an
+    // every-other-hour series (gaps), 6000 rows (the cap), and a working canvas.
+    const straddling = makeBucket('2026-05-31T23:00:00Z', '2026-06-01T01:00:00Z');
+    const series = [
+      straddling,
+      ...hourlyAt(
+        Array.from({ length: 5999 }, (_, i) =>
+          new Date(Date.parse('2026-06-01T02:00:00Z') + i * 2 * 3_600_000)
+            .toISOString()
+            .slice(0, 13),
+        ),
+      ),
+    ];
+    installStubService({
+      getLocation: async () => ({ ...sparseLocation, name: 'No-zone station' }),
+      getMeasurements: async (_sensorId, params) => ({
+        results: series.slice((params.page - 1) * params.limit, params.page * params.limit),
+        found: series.length,
+        foundIsLowerBound: false,
+      }),
+    });
+    stagingCanvas();
+    const result = await runToolContract(getMeasurements, {
+      locationId: 42,
+      parametersId: 2,
+      aggregation: 'hourly',
+      datetimeFrom: '2026-06-01',
+    });
+
+    expect(result.isError).toBeFalsy();
+    const notice = structured(result).notice as string;
+    const segments = [
+      /no timezone for station 42/g,
+      /Pull capped at 5000 rows of 6000/g,
+      /first bucket \(2026-05-31T23:00:00Z → 2026-06-01T01:00:00Z\) starts before datetimeFrom/g,
+      /4999 missing intervals/g,
+      /staged on this canvas as table measurements_7000 \(5000 rows\)/g,
+    ];
+    const positions = segments.map((re) => {
+      const hits = [...notice.matchAll(re)];
+      expect(hits, `segment ${re}`).toHaveLength(1);
+      return hits[0]?.index ?? -1;
+    });
+    expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    expect(wireText(result)).toContain(notice);
+  });
+});
+
+/**
+ * The pager appends whole pages, so a `limit` that does not divide the ceiling
+ * used to overshoot it while the cap notice named the ceiling.
+ */
+describe('openaq_get_measurements pull stops at exactly the row ceiling (#38)', () => {
+  /**
+   * Serves a series of `total` rows page by page. `raw` mimics the raw endpoint's
+   * `meta.found` (`">limit"` on a full page, the page's own count on a short one);
+   * otherwise `found` is the exact series total, as the hourly/daily rollups report it.
+   */
+  const pagedSeries = (total: number, shape: 'raw' | 'rollup') => {
+    const pages: number[] = [];
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async (_sensorId, params) => {
+        pages.push(params.page);
+        const start = (params.page - 1) * params.limit;
+        const n = Math.max(0, Math.min(params.limit, total - start));
+        const full = n === params.limit;
+        return {
+          results: Array.from({ length: n }, () => rawMeasurement),
+          found: shape === 'raw' ? n : total,
+          foundIsLowerBound: shape === 'raw' && full,
+        };
+      },
+    });
+    return pages;
+  };
+
+  const staged = () => {
+    const registerTable = vi.fn(async (name: string, rows: unknown[]) => ({
+      tableName: name,
+      rowCount: rows.length,
+      columns: ['datetimeFrom', 'value'],
+    }));
+    setCanvas({
+      acquire: vi.fn(async () => ({
+        canvasId: 'abc1234567',
+        isNew: true,
+        drop: vi.fn(async () => false),
+        registerTable,
+      })),
+    } as unknown as DataCanvas);
+    return registerTable;
+  };
+
+  const pull = async (limit: number, aggregation: 'raw' | 'hourly' = 'raw') => {
+    const ctx = ctxWith();
+    const result = await getMeasurements.handler(
+      getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation, limit }),
+      ctx,
+    );
+    return {
+      result,
+      enrichment: getEnrichment(ctx),
+      notice: (getEnrichment(ctx).notice ?? '') as string,
+    };
+  };
+
+  it('slices a non-divisor limit back to 5000 rows everywhere, keeping the dropped rows in the floor', async () => {
+    const pages = pagedSeries(20_000, 'raw');
+    const registerTable = staged();
+    const { result, enrichment, notice } = await pull(300);
+
+    expect(pages).toHaveLength(17);
+    expect(result.pulledCount).toBe(5000);
+    expect(registerTable.mock.calls[0]?.[1]).toHaveLength(5000);
+    expect(result.pullComplete).toBe(false);
+    expect(enrichment.totalCount).toBe(5100);
+    expect(enrichment.totalCountIsLowerBound).toBe(true);
+    expect(notice).toMatch(/Pull capped at 5000 rows of at least 5100/);
+    expect(notice).toMatch(/\(5000 rows\)/);
+    expect(notice).not.toMatch(/5100 rows\)/);
+  });
+
+  it('reports an exact total when the page that crosses the ceiling is the last one', async () => {
+    const pages = pagedSeries(16 * 300 + 250, 'raw');
+    const { result, enrichment, notice } = await pull(300);
+
+    expect(pages).toHaveLength(17);
+    expect(result.pulledCount).toBe(5000);
+    expect(result.pullComplete).toBe(false);
+    expect(enrichment.totalCount).toBe(5050);
+    expect(enrichment.totalCountIsLowerBound).toBeUndefined();
+    expect(notice).toMatch(/capped at 5000 rows of 5050/);
+  });
+
+  it('calls a rollup series of exactly 5000 rows complete when OpenAQ reports that exact total', async () => {
+    const pages = pagedSeries(5000, 'rollup');
+    const { result, enrichment, notice } = await pull(1000, 'hourly');
+
+    expect(pages).toHaveLength(5); // no extra request to prove the end
+    expect(result.pulledCount).toBe(5000);
+    expect(result.pullComplete).toBe(true);
+    expect(enrichment.totalCount).toBe(5000);
+    expect(enrichment.totalCountIsLowerBound).toBeUndefined();
+    expect(notice).not.toMatch(/capped at 5000|not complete/);
+  });
+
+  it('does not call a rollup series partial when a page past its exact total fails', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async (_sensorId, params) => {
+        if (params.page >= 3)
+          throw timeout('OpenAQ timed out serving the request.', { status: 408 });
+        return fullPage(dailyMeasurement, 2000);
+      },
+    });
+    const { result, enrichment, notice } = await pull(1000, 'hourly');
+
+    expect(result.pulledCount).toBe(2000);
+    expect(result.pullComplete).toBe(true);
+    expect(enrichment.totalCount).toBe(2000);
+    expect(notice).not.toMatch(/partial|not complete/);
+  });
+
+  it('never pairs a complete pull of exactly 5000 rows with the cap notice', async () => {
+    // 16 full pages of 300, then a short page of 200: the pager saw the end.
+    pagedSeries(5000, 'raw');
+    const { result, notice } = await pull(300);
+
+    expect(result.pulledCount).toBe(5000);
+    expect(result.pullComplete).toBe(true);
+    expect(notice).not.toMatch(/capped at 5000|not complete/);
+  });
+
+  it('leaves a range that ends before the ceiling untouched at a non-divisor limit', async () => {
+    const pages = pagedSeries(900, 'raw');
+    const { result, enrichment, notice } = await pull(300);
+
+    expect(pages).toEqual([1, 2, 3, 4]);
+    expect(result.pulledCount).toBe(900);
+    expect(result.pullComplete).toBe(true);
+    expect(enrichment.totalCount).toBe(900);
+    expect(notice).not.toMatch(/Pull capped/);
+  });
+
+  it('keeps the default limit on the ceiling with the notice unchanged', async () => {
+    pagedSeries(20_000, 'raw');
+    const { result, enrichment, notice } = await pull(1000);
+
+    expect(result.pulledCount).toBe(5000);
+    expect(result.pullComplete).toBe(false);
+    expect(enrichment.totalCount).toBe(5000);
+    expect(notice).toMatch(/Pull capped at 5000 rows — this series is not complete/);
+  });
+});
+
+describe('openaq_get_measurements percentComplete range', () => {
+  it('does not promise a 0–100 range OpenAQ exceeds on a DST fall-back hour', () => {
+    const described =
+      getMeasurements.output.shape.series.element.shape.percentComplete.description ?? '';
+    // "(0–100)" stated the range as a bound; the value can exceed it.
+    expect(described).not.toContain('(0–100)');
+    expect(described).toMatch(/200/);
+  });
+
+  it('carries a 200% bucket through output validation', async () => {
+    serveRows([
+      makeBucket('2025-11-02T09:00:00Z', '2025-11-02T10:00:00Z', { percentComplete: 200 }),
+    ]);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'hourly',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(wireText(result)).toContain('200% complete');
+  });
+});
+
+/**
+ * Every recovery a notice suggests has to be one the caller can still take: a
+ * daily series has no coarser aggregation to fall back to, and a date-only bound
+ * cannot be the fix for an edge the date-only bound itself produced.
+ */
+describe('openaq_get_measurements notice advice fits the request', () => {
+  const noticeFor = async (
+    aggregation: 'raw' | 'hourly' | 'daily',
+    getMeasurementsImpl: (page: number) => MeasurementsPage,
+  ) => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getMeasurements: async (_sensorId, params) => getMeasurementsImpl(params.page),
+    });
+    const ctx = ctxWith();
+    await getMeasurements.handler(
+      getMeasurements.input.parse({ locationId: 931, parametersId: 2, aggregation }),
+      ctx,
+    );
+    return (getEnrichment(ctx).notice ?? '') as string;
+  };
+
+  it('never tells a capped daily series to switch to daily or hourly aggregation', async () => {
+    const notice = await noticeFor('daily', () => fullPage(dailyMeasurement, 8000));
+    expect(notice).toMatch(/Pull capped at 5000 rows of 8000/);
+    expect(notice).toMatch(/shorter windows/);
+    expect(notice).not.toMatch(/daily aggregation|hourly\/daily/);
+  });
+
+  it('points a capped hourly series at daily, not at the hourly it already uses', async () => {
+    const notice = await noticeFor('hourly', () => fullPage(dailyMeasurement, 8000));
+    expect(notice).toMatch(/use daily aggregation to fit the whole span under the cap/);
+    expect(notice).not.toMatch(/hourly\/daily/);
+  });
+
+  it('keeps the hourly/daily advice for a capped raw series', async () => {
+    const notice = await noticeFor('raw', () => fullPage(rawMeasurement, 1000, true));
+    expect(notice).toMatch(/use hourly\/daily aggregation to fit the whole span under the cap/);
+    expect(notice).toMatch(/narrow the range \/ use daily aggregation/);
+  });
+
+  it('offers no coarser aggregation when a daily pull stops on a failed page', async () => {
+    const notice = await noticeFor('daily', (page) => {
+      if (page >= 3) throw timeout('OpenAQ timed out serving the request.', { status: 408 });
+      return fullPage(dailyMeasurement, 8000);
+    });
+    expect(notice).toMatch(/Series is partial — page 3 failed/);
+    expect(notice).toMatch(/shorter date windows/);
+    expect(notice).not.toMatch(/coarser aggregation/);
+  });
+
+  it('asks a DataCanvas-less daily overflow to narrow the range, not to use daily', async () => {
+    const notice = await noticeFor('daily', (page) =>
+      page === 1 ? onePage(Array.from({ length: 150 }, () => dailyMeasurement)) : onePage([]),
+    );
+    expect(notice).toMatch(/capped at 100 of 150 rows/);
+    expect(notice).toMatch(/narrow the range/);
+    expect(notice).not.toMatch(/daily aggregation/);
+  });
+
+  it('asks a daily overflow the canvas failed to stage to narrow the range, not to use daily', async () => {
+    setCanvas({
+      acquire: vi.fn(async () => {
+        throw new Error('duckdb failed to start');
+      }),
+    } as unknown as DataCanvas);
+    const notice = await noticeFor('daily', () =>
+      onePage(Array.from({ length: 150 }, () => dailyMeasurement)),
+    );
+    expect(notice).toMatch(/could not stage the series \(duckdb failed to start\)/);
+    expect(notice).toMatch(/Narrow the range to fit the series inline/);
+    expect(notice).not.toMatch(/daily aggregation/);
+  });
+
+  it('flags an upstream bucket that overruns a date-only day without advising date-only bounds', async () => {
+    // OpenAQ returns the day before spring-forward as a 47-hour bucket.
+    serveRows(bucketsFrom([['2026-03-07T08:00:00Z', '2026-03-09T07:00:00Z']], { label: '1 day' }));
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-03-07',
+      datetimeTo: '2026-03-07',
+    });
+    const notice = structured(result).notice as string;
+    expect(notice).toMatch(/last bucket \(2026-03-07T08:00:00Z → 2026-03-09T07:00:00Z\)/);
+    expect(notice).not.toMatch(/Date-only bounds align/);
+  });
+
+  it('does not claim date-only bounds align when the station has no timezone', async () => {
+    serveRows(
+      bucketsFrom([['2026-07-31T07:00:00Z', '2026-08-01T07:00:00Z']], { label: '1 day' }),
+      sparseLocation,
+    );
+    const result = await runToolContract(getMeasurements, {
+      locationId: 42,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-08-01',
+      datetimeTo: '2026-08-01',
+    });
+    const notice = structured(result).notice as string;
+    expect(notice).toMatch(/UTC days/);
+    expect(notice).toMatch(/starts before datetimeFrom/);
+    expect(notice).not.toMatch(/Date-only bounds align/);
+  });
+
+  it('points a clipped hourly edge at date-only bounds, not whole UTC hours, in a :45 zone', async () => {
+    // Kathmandu (UTC+05:45): OpenAQ's hourly buckets open on the local hour, :15 UTC.
+    serveRows([makeBucket('2026-09-09T18:15:00Z', '2026-09-09T19:15:00Z')], {
+      ...seattleLocation,
+      timezone: 'Asia/Kathmandu',
+    });
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'hourly',
+      datetimeFrom: '2026-09-09T18:30:00Z',
+      datetimeTo: '2026-09-10',
+    });
+    const notice = structured(result).notice as string;
+    expect(notice).toMatch(/first bucket .* starts before datetimeFrom/);
+    expect(notice).not.toMatch(/Whole-hour timestamps/);
+    expect(notice).toMatch(/Date-only bounds align with the station's local days and hours/);
+  });
+
+  it('keeps the date-only hint when an explicit timestamp clipped a daily edge', async () => {
+    serveRows(bucketsFrom([['2026-07-31T07:00:00Z', '2026-08-01T07:00:00Z']], { label: '1 day' }));
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2026-08-01T00:00:00Z',
+      datetimeTo: '2026-08-01',
+    });
+    expect(structured(result).notice).toMatch(
+      /Date-only bounds align with the station's local days and hours/,
+    );
+  });
+});
+
+describe('openaq_get_measurements date-only disclosure', () => {
+  it('does not promise the most recent values when datetimeFrom is omitted — the series runs oldest first', () => {
+    const described = getMeasurements.input.shape.datetimeFrom.description ?? '';
+    expect(described).not.toMatch(/most recent/);
+    expect(described).toMatch(/earliest/);
+  });
+
+  it('names the station timezone when a date-only bound empties a mixed range', async () => {
+    serveRows([dailyMeasurement]);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'hourly',
+      datetimeFrom: '2026-08-01',
+      datetimeTo: '2026-08-01T05:00:00Z',
+    });
+    expect(result.isError).toBe(true);
+    expect(wireText(result)).toMatch(
+      /2026-08-01T07:00:00Z to 2026-08-01T05:00:00Z is empty.*local midnight in America\/Los_Angeles/s,
+    );
   });
 });

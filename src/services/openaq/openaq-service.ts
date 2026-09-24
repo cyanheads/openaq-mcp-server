@@ -74,8 +74,10 @@ export interface MeasurementsParams {
 /** A measurements page, carrying the parsed `meta.found` total for enrichment. */
 export interface MeasurementsPage {
   /**
-   * Total across all pages as a number. A floor rather than an exact total when
-   * `foundIsLowerBound` is set — read the two together.
+   * `meta.found` as a number — read with `foundIsLowerBound`. On `/hourly` and
+   * `/daily` it is the exact total across pages. On raw it is only a per-page
+   * figure: a floor (`">limit"`) on a full page, the page's own row count on a
+   * short one — never a raw series total.
    */
   found: number;
   /** True when the API reported `">N"`, so `found` is N and more rows exist. */
@@ -89,8 +91,8 @@ const FETCH_TIMEOUT_MS = 15_000;
  * Interpret `meta.found` (which may be a string like `">5"`) into a numeric floor
  * plus whether it is a lower bound. `">N"` means strictly more than N exist, so the
  * embedded number is a floor, not an exact total. A bare number is exact. Only
- * valid where `meta.found` is a total (the measurements endpoints) — on
- * `/v3/locations` it is a per-page count; see `OpenAqMeta.found`.
+ * a series total on the `/hourly` and `/daily` measurement rollups — on raw
+ * measurements and `/v3/locations` it is a per-page count; see `OpenAqMeta.found`.
  */
 function interpretFound(found: number | string | undefined): {
   isLowerBound: boolean;

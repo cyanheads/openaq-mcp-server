@@ -163,6 +163,73 @@ export const impreciseDaily: OpenAqMeasurement = {
   flagInfo: { hasFlags: false },
 };
 
+/**
+ * A measurement bucket over one UTC period, for the gap, DST, and clipping tests
+ * where only the boundaries and the value matter. `local` repeats the UTC instant
+ * because no tool reads it. A `value: null` bucket carries the all-null summary
+ * of a captured gap bucket (see `gapBucketHourly`).
+ */
+export function makeBucket(
+  from: string,
+  to: string,
+  opts: { label?: string; percentComplete?: number; value?: number | null } = {},
+): OpenAqMeasurement {
+  const value = opts.value === undefined ? 5 : opts.value;
+  const stat = value;
+  return {
+    value,
+    parameter: { id: 2, name: 'pm25', units: 'µg/m³', displayName: null },
+    period: {
+      label: opts.label ?? '1 hour',
+      datetimeFrom: { utc: from, local: from },
+      datetimeTo: { utc: to, local: to },
+    },
+    summary: { min: stat, median: stat, max: stat, avg: stat, sd: null },
+    coverage: { percentComplete: opts.percentComplete ?? 100 },
+    flagInfo: { hasFlags: false },
+  };
+}
+
+/**
+ * Station 931 (America/Los_Angeles) bucket boundaries captured live 2026-09-23 on
+ * sensor 1701, as `[datetimeFrom, datetimeTo]` UTC pairs. OpenAQ labels an hour by
+ * its end and a day by the station's local calendar day, so DST shows up in the
+ * boundaries rather than as missing time.
+ */
+export const dstBoundaries = {
+  /** Daily 2025-11-01..2025-11-03 local: the fall-back day is the 25-hour bucket. */
+  dailyFallBack: [
+    ['2025-11-01T07:00:00Z', '2025-11-02T07:00:00Z'],
+    ['2025-11-02T07:00:00Z', '2025-11-03T08:00:00Z'],
+    ['2025-11-03T08:00:00Z', '2025-11-04T08:00:00Z'],
+  ],
+  /** Hourly 2025-11-02T06:00Z–12:00Z: the repeated local hour arrives as one 2-hour bucket. */
+  hourlyFallBack: [
+    ['2025-11-02T06:00:00Z', '2025-11-02T07:00:00Z'],
+    ['2025-11-02T07:00:00Z', '2025-11-02T09:00:00Z'],
+    ['2025-11-02T09:00:00Z', '2025-11-02T10:00:00Z'],
+    ['2025-11-02T10:00:00Z', '2025-11-02T11:00:00Z'],
+    ['2025-11-02T11:00:00Z', '2025-11-02T12:00:00Z'],
+  ],
+  /** Hourly 2026-03-08T08:00Z–13:00Z: the skipped local hour leaves the UTC hours contiguous. */
+  hourlySpringForward: [
+    ['2026-03-08T08:00:00Z', '2026-03-08T09:00:00Z'],
+    ['2026-03-08T09:00:00Z', '2026-03-08T10:00:00Z'],
+    ['2026-03-08T10:00:00Z', '2026-03-08T11:00:00Z'],
+    ['2026-03-08T11:00:00Z', '2026-03-08T12:00:00Z'],
+    ['2026-03-08T12:00:00Z', '2026-03-08T13:00:00Z'],
+  ],
+  /**
+   * Daily around 2026-03-08: OpenAQ returns the day before the change as a 47-hour
+   * bucket that overlaps the next one — an upstream shape, not missing time.
+   */
+  dailySpringForwardOverlap: [
+    ['2026-03-07T08:00:00Z', '2026-03-09T07:00:00Z'],
+    ['2026-03-08T08:00:00Z', '2026-03-09T07:00:00Z'],
+    ['2026-03-09T07:00:00Z', '2026-03-10T07:00:00Z'],
+  ],
+} as const satisfies Record<string, readonly (readonly [string, string])[]>;
+
 /** A raw measurement row — no summary block. */
 export const rawMeasurement: OpenAqMeasurement = {
   value: 6.3,

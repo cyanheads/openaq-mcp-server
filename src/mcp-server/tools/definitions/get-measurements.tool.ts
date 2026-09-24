@@ -6,10 +6,13 @@
  * supplied a canvas_id: the response then carries a canvasId + table name to read
  * with openaq_dataframe_describe, then openaq_dataframe_query. One table per
  * sensor, so re-staging the same sensor on a canvas overwrites its earlier series.
- * The pull is bounded at MAX_ROWS and can also stop on a failed page, so
+ * The pull is bounded at exactly MAX_ROWS and can also stop on a failed page, so
  * pulledCount / pullComplete report what was actually collected and totalCount is
- * a floor whenever OpenAQ answered with a ">N" lower bound. Values carry their
- * unit; units are never converted.
+ * a floor whenever OpenAQ answered with a ">N" lower bound. A date-only bound is
+ * the station's local calendar day, resolved from the timezone on the location
+ * lookup the handler already makes; the bounds sent upstream come back as
+ * effectiveRange, and hourly/daily series report their missing intervals. Values
+ * carry their unit; units are never converted.
  * @module mcp-server/tools/definitions/get-measurements.tool
  */
 
@@ -28,24 +31,137 @@ const MAX_ROWS = 5000;
 const PAGE_LIMIT = 1000;
 /** Inline preview budget in rows (the JSON char budget for canvas spill is separate). */
 const PREVIEW_ROWS = 100;
+/** Missing intervals listed in `gaps`; `gapCount` stays exact past it. */
+const MAX_LISTED_GAPS = 20;
 
 const dateRegex = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$/;
 const dateOnlyRegex = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_MS = 86_400_000;
+
+/** True for a supplied `YYYY-MM-DD` bound — a whole station-local day, not an instant. */
+const isDateOnly = (bound: string | undefined): boolean =>
+  bound !== undefined && dateOnlyRegex.test(bound);
+
+/** An instant as `YYYY-MM-DDTHH:MM:SSZ` — the fixed-width form OpenAQ accepts. */
+const toUtcSeconds = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
 
 /**
- * Expand an accepted range bound to a full UTC timestamp. A date-only bound names
- * a whole day, so a lower bound opens at midnight and an upper bound closes at the
- * last second — which is what the "inclusive" in both field descriptions promises,
- * and what keeps a same-day date-only range from collapsing to zero width (OpenAQ
- * rejects `from == to` with a 422). Explicit timestamps pass through untouched.
- *
- * Normalizing both bounds to one fixed-width format also makes the ordering check
- * a plain lexicographic compare — for `YYYY-MM-DDTHH:MM:SSZ`, string order is
- * chronological order.
+ * A formatter that reads the calendar date at an instant in `timeZone`, cached per
+ * zone. Undefined when the runtime does not recognize the zone name.
  */
-function normalizeBound(value: string, edge: 'start' | 'end'): string {
-  if (!dateOnlyRegex.test(value)) return value;
-  return edge === 'start' ? `${value}T00:00:00Z` : `${value}T23:59:59Z`;
+function dayFormatter(timeZone: string): Intl.DateTimeFormat | undefined {
+  let formatter = dayFormatters.get(timeZone);
+  if (!formatter) {
+    try {
+      formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      });
+    } catch (err) {
+      if (err instanceof RangeError) return;
+      throw err;
+    }
+    dayFormatters.set(timeZone, formatter);
+  }
+  return formatter;
+}
+
+/** The calendar date at `ms` as `YYYY-MM-DD`, read by `formatter`. */
+function localDate(formatter: Intl.DateTimeFormat, ms: number): string {
+  const parts = formatter.formatToParts(ms);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === type)?.value;
+  return `${part('year')}-${part('month')}-${part('day')}`;
+}
+
+/**
+ * The first instant of calendar day `day` in the formatter's zone, found by
+ * bisecting on "the local date here is `day` or later". Every zone's offset lies
+ * within UTC−12…UTC+14, so that instant falls inside a window around `day`
+ * 00:00Z. Bisection needs no offset arithmetic, so it also lands correctly on a
+ * day whose midnight is skipped (the day opens at the transition, e.g. 01:00) or
+ * repeated (the first 00:00).
+ */
+function localDayStart(day: string, formatter: Intl.DateTimeFormat): number {
+  const utcMidnight = Date.parse(`${day}T00:00:00Z`) / 1000;
+  let before = utcMidnight - 15 * 3600; // local date is still the previous day
+  let onOrAfter = utcMidnight + 13 * 3600; // local date has reached `day`
+  while (onOrAfter - before > 1) {
+    const mid = Math.floor((before + onOrAfter) / 2);
+    if (localDate(formatter, mid * 1000) >= day) onOrAfter = mid;
+    else before = mid;
+  }
+  return onOrAfter * 1000;
+}
+
+/**
+ * Expand the accepted bounds to the UTC instants sent upstream. A date-only bound
+ * names the station's local calendar day: `datetimeFrom` opens at its local
+ * midnight and `datetimeTo` closes at the next one. OpenAQ labels an hour by its
+ * end and treats `datetime_to` as inclusive, so closing at the next midnight keeps
+ * the day's last hour, and a DST day spans 23 or 25 hours. Without a usable
+ * `formatter` (no station timezone, or one the runtime does not know) the day is
+ * a UTC day. Explicit timestamps pass through untouched. Both bounds come out
+ * fixed-width, so string order is chronological order.
+ */
+function resolveBounds(
+  bounds: { datetimeFrom?: string | undefined; datetimeTo?: string | undefined },
+  formatter: Intl.DateTimeFormat | undefined,
+): { datetimeFrom?: string; datetimeTo?: string } {
+  const dayStart = (day: string) =>
+    toUtcSeconds(formatter ? localDayStart(day, formatter) : Date.parse(`${day}T00:00:00Z`));
+  const nextDay = (day: string) =>
+    toUtcSeconds(Date.parse(`${day}T00:00:00Z`) + DAY_MS).slice(0, 10);
+  const { datetimeFrom, datetimeTo } = bounds;
+  return {
+    ...(datetimeFrom && {
+      datetimeFrom: isDateOnly(datetimeFrom) ? dayStart(datetimeFrom) : datetimeFrom,
+    }),
+    ...(datetimeTo && {
+      datetimeTo: isDateOnly(datetimeTo) ? dayStart(nextDay(datetimeTo)) : datetimeTo,
+    }),
+  };
+}
+
+/** A UTC span, as `gaps` lists it. */
+interface Span {
+  datetimeFrom: string;
+  datetimeTo: string;
+}
+
+/**
+ * Missing intervals inside an hourly/daily series, oldest first: the span between
+ * two buckets that do not touch, plus the period of any bucket with no value,
+ * merged where they are contiguous. Buckets are compared by their own UTC
+ * boundaries, which OpenAQ already stretches or shrinks across a DST change, so
+ * the walk does no fixed-length arithmetic — and an overlap (OpenAQ returns one
+ * around spring-forward) counts as covered. Only interior spans count: the stretch
+ * between a requested bound and the first or last bucket is not a gap.
+ */
+function findGaps(rows: readonly SeriesRow[]): Span[] {
+  const buckets = rows
+    .map((r) => ({
+      from: Date.parse(r.datetimeFrom),
+      to: Date.parse(r.datetimeTo),
+      empty: r.value === null,
+    }))
+    .sort((a, b) => a.from - b.from);
+  const gaps: { from: number; to: number }[] = [];
+  const add = (from: number, to: number) => {
+    const last = gaps.at(-1);
+    if (last && from <= last.to) last.to = Math.max(last.to, to);
+    else gaps.push({ from, to });
+  };
+  let covered: number | undefined;
+  for (const b of buckets) {
+    if (covered !== undefined && b.from > covered) add(covered, b.from);
+    if (b.empty) add(b.from, b.to);
+    covered = Math.max(covered ?? b.to, b.to);
+  }
+  return gaps.map((g) => ({ datetimeFrom: toUtcSeconds(g.from), datetimeTo: toUtcSeconds(g.to) }));
 }
 
 /**
@@ -101,7 +217,7 @@ function toOutputRow(r: SeriesRow, aggregation: 'raw' | 'hourly' | 'daily') {
 export const getMeasurements = tool('openaq_get_measurements', {
   title: 'openaq-mcp-server: get measurements',
   description:
-    'Historical measurement series for one pollutant at one station over a date range — for trend analysis and "was last week worse than the monthly average?". Pass a locationId and a parametersId and work in stations — you get the series for that pollutant at that station. Choose aggregation: raw (every reported value), hourly, or daily — daily and hourly add a per-bucket statistical summary (min, median, max, mean, sd). Large ranges produce thousands of rows and stage on a DataCanvas: the response returns a preview plus a canvasId and table name — call openaq_dataframe_describe on the canvasId for the table\'s columns, then openaq_dataframe_query to run SQL over it. Passing a canvas_id stages the series there whatever its size, so two stations land on one canvas for a side-by-side comparison. Values carry their unit; the server never converts between µg/m³, ppm, and ppb.',
+    'Historical measurement series for one pollutant at one station over a date range — for trend analysis and "was last week worse than the monthly average?". Pass a locationId and a parametersId and work in stations — you get the series for that pollutant at that station. Choose aggregation: raw (every reported value), hourly, or daily — daily and hourly add a per-bucket statistical summary (min, median, max, mean, sd). A date-only bound means the station\'s local calendar day. Large ranges produce thousands of rows and stage on a DataCanvas: the response returns a preview plus a canvasId and table name — call openaq_dataframe_describe on the canvasId for the table\'s columns, then openaq_dataframe_query to run SQL over it. Passing a canvas_id stages the series there whatever its size, so two stations land on one canvas for a side-by-side comparison. Values carry their unit; the server never converts between µg/m³, ppm, and ppb.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     locationId: z.number().int().positive().describe('Station id from openaq_find_locations.'),
@@ -117,20 +233,20 @@ export const getMeasurements = tool('openaq_get_measurements', {
       .regex(dateRegex)
       .optional()
       .describe(
-        'Start of the range, inclusive. Date "YYYY-MM-DD" (opens at 00:00:00Z that day) or full UTC "YYYY-MM-DDTHH:MM:SSZ". Omit to get the most recent values.',
+        'Start of the range, inclusive. A date "YYYY-MM-DD" opens at local midnight of that day in the station\'s timezone (UTC midnight when OpenAQ lists none); a full UTC "YYYY-MM-DDTHH:MM:SSZ" is sent as is. Omit to start from the sensor\'s earliest data — the series runs oldest first, so on a long-running station an open start fills the row cap with its oldest values; set datetimeFrom to reach recent ones. effectiveRange echoes the instant sent.',
       ),
     datetimeTo: z
       .string()
       .regex(dateRegex)
       .optional()
       .describe(
-        'End of the range, inclusive. Date "YYYY-MM-DD" covers that whole day (closes at 23:59:59Z) or full UTC "YYYY-MM-DDTHH:MM:SSZ". Must land after datetimeFrom — the two forms mix freely, so "2026-06-25" to "2026-06-25" is a valid one-day range. Omit for "up to now".',
+        'End of the range, inclusive. A date "YYYY-MM-DD" covers that whole station-local day, closing at the next local midnight, so a DST day spans 23 or 25 hours; a full UTC "YYYY-MM-DDTHH:MM:SSZ" is sent as is. Must land after datetimeFrom — the two forms mix freely, so "2026-06-25" to "2026-06-25" is a valid one-day range. Omit for "up to now". effectiveRange echoes the instant sent.',
       ),
     aggregation: z
       .enum(['raw', 'hourly', 'daily'])
       .default('raw')
       .describe(
-        'Time bucketing. "raw" = every reported value (often hourly at source). "hourly"/"daily" = server-side rollups with a statistical summary per bucket. Use "daily" for multi-month trends to keep the series small; "raw" for fine-grained recent analysis.',
+        'Time bucketing. "raw" = every reported value (often hourly at source). "hourly"/"daily" = server-side rollups with a statistical summary per bucket; an hour is labeled by the time it ends, and a day is the station\'s local calendar day. Use "daily" for multi-month trends to keep the series small; "raw" for fine-grained recent analysis.',
       ),
     limit: z
       .number()
@@ -150,6 +266,24 @@ export const getMeasurements = tool('openaq_get_measurements', {
       .object({
         id: z.number().describe('Station id'),
         name: z.string().describe('Station name'),
+        provider: z
+          .string()
+          .nullable()
+          .describe(
+            'Network that operates the station — cite it alongside OpenAQ. Null when OpenAQ lists none.',
+          ),
+        providerId: z
+          .number()
+          .nullable()
+          .describe(
+            'Provider id, usable as providersId in openaq_find_locations. Null when OpenAQ lists none.',
+          ),
+        timezone: z
+          .string()
+          .nullable()
+          .describe(
+            'IANA timezone of the station (e.g. "America/Los_Angeles"). Daily buckets and date-only bounds follow its calendar days. Null when OpenAQ lists none.',
+          ),
       })
       .describe('Station the series came from'),
     parameter: z
@@ -194,7 +328,9 @@ export const getMeasurements = tool('openaq_get_measurements', {
             percentComplete: z
               .number()
               .nullable()
-              .describe('Coverage of the bucket (0–100); low values flag gappy data'),
+              .describe(
+                'Coverage of the bucket as OpenAQ reports it — observed readings as a percentage of expected ones. Low values flag gappy data. Usually 0–100, but it exceeds 100 when a bucket holds more readings than expected, e.g. 200 on the hour a DST fall-back repeats',
+              ),
             flagged: z
               .boolean()
               .describe('True if the source flagged this value (quality concern)'),
@@ -202,18 +338,18 @@ export const getMeasurements = tool('openaq_get_measurements', {
           .describe('One bucket in the series, with its value and (for rollups) statistics'),
       )
       .describe(
-        'The (possibly previewed) series, newest or oldest first per the API. Every row here is also rendered in the text output. When truncated, this is a preview of pulledCount rows — query canvasId for the rest.',
+        'The (possibly previewed) series in the order OpenAQ returns it (oldest first). An hourly/daily series either skips a missing bucket or returns it with a null value — gapCount and gaps report both. Every row here is also rendered in the text output. When truncated, this is a preview of pulledCount rows — query canvasId for the rest.',
       ),
     rowCount: z.number().describe('Rows in this response (preview length when spilled)'),
     pulledCount: z
       .number()
       .describe(
-        "Rows pulled from OpenAQ — the canvas table's row count when canvasId is present. Equals rowCount when the whole series fit inline; larger when series is a preview.",
+        `Rows pulled from OpenAQ, at most ${MAX_ROWS} — the canvas table's row count when canvasId is present. Equals rowCount when the whole series fit inline; larger when series is a preview.`,
       ),
     pullComplete: z
       .boolean()
       .describe(
-        `True when the pager reached the end of the requested range, so pulledCount is the whole series for it. False when the ${MAX_ROWS}-row cap or a failed page stopped the pull early — the rows past that point are in neither this response nor the canvas table, and the notice says how to reach them.`,
+        `True when pulledCount is the whole series for the requested range. False when the ${MAX_ROWS}-row cap or a failed page stopped the pull early — the rows past that point are in neither this response nor the canvas table, and the notice says how to reach them.`,
       ),
     canvasId: z
       .string()
@@ -246,12 +382,60 @@ export const getMeasurements = tool('openaq_get_measurements', {
       .describe(
         'Set when totalCount is only a floor: the pull stopped early and OpenAQ reported the range total as ">N" instead of an exact number, so more rows exist than totalCount states. Absent when the count is exact.',
       ),
+    effectiveRange: z
+      .object({
+        datetimeFrom: z
+          .string()
+          .nullable()
+          .describe('Lower bound sent to OpenAQ, UTC. Null when datetimeFrom was omitted.'),
+        datetimeTo: z
+          .string()
+          .nullable()
+          .describe('Upper bound sent to OpenAQ, UTC. Null when datetimeTo was omitted.'),
+      })
+      .describe(
+        "The range sent to OpenAQ as UTC instants — date-only bounds expanded to the station's local day.",
+      ),
+    gapCount: z
+      .number()
+      .optional()
+      .describe(
+        'Missing intervals inside an hourly or daily series — a span between buckets that do not touch, or a bucket with a null value, merged where contiguous — counted over every pulled row, not only the preview. 0 when nothing is missing; absent for raw, whose rows follow no fixed cadence.',
+      ),
+    gaps: z
+      .array(
+        z
+          .object({
+            datetimeFrom: z.string().describe('Start of the missing interval, UTC'),
+            datetimeTo: z.string().describe('End of the missing interval, UTC'),
+          })
+          .describe('One missing interval'),
+      )
+      .optional()
+      .describe(
+        `The first ${MAX_LISTED_GAPS} missing intervals, oldest first. Omitted when gapCount is 0.`,
+      ),
     notice: z
       .string()
       .optional()
       .describe(
-        'What limited this response or where the rest of it lives — the row cap, a failed page, DataCanvas being unavailable, or the canvas table the series was staged on and the tools that read it.',
+        'What limited this response or where the rest of it lives — the row cap, a failed page, a station with no timezone, an edge bucket clipped by the range, missing intervals, DataCanvas being unavailable, or the canvas table the series was staged on and the tools that read it.',
       ),
+  },
+  enrichmentTrailer: {
+    effectiveRange: {
+      render: (range) =>
+        `**Range sent to OpenAQ:** ${range.datetimeFrom ?? '(no lower bound)'} → ${range.datetimeTo ?? '(no upper bound)'}`,
+    },
+    gapCount: { label: 'Missing intervals' },
+    gaps: {
+      // Typed optional because the field is; the trailer only renders a present value.
+      render: (gaps = []) =>
+        [
+          `**Missing interval spans${gaps.length === MAX_LISTED_GAPS ? ` (first ${MAX_LISTED_GAPS})` : ''}:**`,
+          ...gaps.map((g) => `- ${g.datetimeFrom} → ${g.datetimeTo}`),
+        ].join('\n'),
+    },
   },
   errors: [
     {
@@ -280,9 +464,9 @@ export const getMeasurements = tool('openaq_get_measurements', {
     {
       reason: 'invalid_date_range',
       code: JsonRpcErrorCode.ValidationError,
-      when: 'The range is empty — once both bounds are expanded to full UTC timestamps, datetimeTo does not land after datetimeFrom.',
+      when: "The range is empty — once date-only bounds are expanded to the station's local day, datetimeTo does not land after datetimeFrom.",
       recovery:
-        'Move datetimeTo to a later instant than datetimeFrom; OpenAQ rejects a zero-width range. A date-only bound spans the whole day, so "2026-06-25" to "2026-06-25" already covers a full day.',
+        'Move datetimeTo to a later instant than datetimeFrom; OpenAQ rejects a zero-width range. A date-only bound spans the whole station-local day, so "2026-06-25" to "2026-06-25" already covers a full day.',
       retryable: false,
     },
     {
@@ -334,19 +518,20 @@ export const getMeasurements = tool('openaq_get_measurements', {
   async handler(input, ctx) {
     const service = getOpenAqService();
 
-    // Expand both bounds before comparing or forwarding: the schema accepts a
-    // date and a timestamp interchangeably, and OpenAQ 500s on a mixed pair.
-    const datetimeFrom = input.datetimeFrom
-      ? normalizeBound(input.datetimeFrom, 'start')
-      : undefined;
-    const datetimeTo = input.datetimeTo ? normalizeBound(input.datetimeTo, 'end') : undefined;
-
-    if (datetimeFrom && datetimeTo && datetimeTo <= datetimeFrom) {
-      throw ctx.fail('invalid_date_range', `Range ${datetimeFrom} to ${datetimeTo} is empty.`, {
-        datetimeFrom,
-        datetimeTo,
-        ...ctx.recoveryFor('invalid_date_range'),
-      });
+    // Two bounds of the same form order the same way in every timezone — a date
+    // pair spans the first date's start to the second date's end — so an inverted
+    // pair fails here, before any request. A mixed pair needs the station's
+    // timezone and is checked once the location is in hand.
+    const { datetimeFrom: fromInput, datetimeTo: toInput } = input;
+    if (fromInput && toInput && isDateOnly(fromInput) === isDateOnly(toInput)) {
+      const empty = isDateOnly(fromInput) ? toInput < fromInput : toInput <= fromInput;
+      if (empty) {
+        throw ctx.fail('invalid_date_range', `Range ${fromInput} to ${toInput} is empty.`, {
+          datetimeFrom: fromInput,
+          datetimeTo: toInput,
+          ...ctx.recoveryFor('invalid_date_range'),
+        });
+      }
     }
 
     // Resolve the sensor for this parameter from the station's sensor map.
@@ -379,16 +564,58 @@ export const getMeasurements = tool('openaq_get_measurements', {
       );
     }
 
-    /** Everything that limited this response, composed into one `notice` at the end. */
-    const notices: string[] = [];
+    // Expand both bounds before comparing or forwarding: a date names the
+    // station's local day, and OpenAQ 500s on a mixed date/timestamp pair.
+    const formatter = location.timezone === null ? undefined : dayFormatter(location.timezone);
+    const { datetimeFrom, datetimeTo } = resolveBounds(input, formatter);
+    if (datetimeFrom && datetimeTo && datetimeTo <= datetimeFrom) {
+      // Only a mixed pair reaches here, so one bound was a date the caller never
+      // saw expanded — name the zone that moved it.
+      const readAs = formatter
+        ? `date-only bounds open and close at local midnight in ${location.timezone}`
+        : 'date-only bounds were read as UTC days';
+      throw ctx.fail(
+        'invalid_date_range',
+        `Range ${datetimeFrom} to ${datetimeTo} is empty — ${readAs}.`,
+        { datetimeFrom, datetimeTo, ...ctx.recoveryFor('invalid_date_range') },
+      );
+    }
+    ctx.enrich({
+      effectiveRange: { datetimeFrom: datetimeFrom ?? null, datetimeTo: datetimeTo ?? null },
+    });
 
-    // Page the series up to the row ceiling.
+    /**
+     * Notice segments, in reading order. `ctx.enrich.notice` is last-wins, so each
+     * branch writes its own slot and the handler flushes them once at the end.
+     */
+    const notices = {
+      timezone: '',
+      pull: '',
+      clipped: '',
+      gaps: '',
+      canvas: '',
+    };
+
+    /** The next coarser aggregation a notice can suggest — none past daily. */
+    const coarser = { raw: 'hourly/daily', hourly: 'daily', daily: undefined }[input.aggregation];
+
+    if ((isDateOnly(fromInput) || isDateOnly(toInput)) && !formatter) {
+      const why =
+        location.timezone === null
+          ? `OpenAQ lists no timezone for station ${location.id}`
+          : `Station ${location.id}'s timezone "${location.timezone}" is not one this server recognizes`;
+      notices.timezone = `${why}, so the date-only bounds were read as UTC days (00:00Z to the next 00:00Z) and may not line up with its daily buckets.`;
+    }
+
+    // Page the series up to the row ceiling. The last page can carry it past the
+    // ceiling when `limit` does not divide it; the excess is sliced off below.
     const pageSize = Math.min(input.limit, PAGE_LIMIT);
-    const allRows: SeriesRow[] = [];
+    const fetched: SeriesRow[] = [];
     let found = 0;
     let foundIsLowerBound = false;
     let exhausted = false;
-    for (let page = 1; allRows.length < MAX_ROWS; page++) {
+    let failure: { message: string; page: number } | undefined;
+    for (let page = 1; fetched.length < MAX_ROWS; page++) {
       // Covers an abort that lands between pages, when no fetch is in flight.
       ctx.signal.throwIfAborted();
       let result: MeasurementsPage;
@@ -413,28 +640,26 @@ export const getMeasurements = tool('openaq_get_measurements', {
         ctx.signal.throwIfAborted();
         // Rows already pulled are good data. Losing them because a later page
         // failed serves nobody — keep them, and say what was lost and why.
-        if (allRows.length === 0) throw err;
+        if (fetched.length === 0) throw err;
+        failure = { page, message: err instanceof Error ? err.message : String(err) };
         ctx.log.warning('Measurement paging stopped early on a page failure', {
           sensorId: sensor.id,
           page,
-          rowsCollected: allRows.length,
-          error: err instanceof Error ? err.message : String(err),
+          rowsCollected: fetched.length,
+          error: failure.message,
         });
-        notices.push(
-          `Series is partial — page ${page} failed (${err instanceof Error ? err.message : String(err)}), so it stops at ${allRows.length} rows. OpenAQ times out once the page offset gets deep; pull the rest in shorter date windows, or use a coarser aggregation so the whole span fits in fewer pages.`,
-        );
         break;
       }
       found = result.found;
       foundIsLowerBound = result.foundIsLowerBound;
-      allRows.push(...result.results.map(toSeriesRow));
+      fetched.push(...result.results.map(toSeriesRow));
       if (result.results.length < pageSize) {
         exhausted = true;
         break;
       }
     }
 
-    if (allRows.length === 0) {
+    if (fetched.length === 0) {
       throw ctx.fail(
         'no_data_for_range',
         `Sensor ${sensor.id} has no data for the requested range.`,
@@ -445,19 +670,28 @@ export const getMeasurements = tool('openaq_get_measurements', {
       );
     }
 
-    // An exhausted pull holds the whole range, so its own count is the exact
-    // total whatever `meta.found` claimed. A pull that stopped early publishes
-    // the upstream figure, floored at the rows in hand — and says the figure is
-    // a floor when OpenAQ only gave a ">N" bound, so 5,001 matching rows are
-    // distinguishable from 500,000.
-    const pullComplete = exhausted;
-    const pulledCount = allRows.length;
-    const totalCount = pullComplete ? pulledCount : Math.max(found, pulledCount);
-    const totalCountIsLowerBound = !pullComplete && foundIsLowerBound;
+    // The series length is known when the pager saw a short page, or when OpenAQ
+    // gave an exact total that the rows in hand match — the hourly/daily rollups
+    // report one, while raw answers a full page with ">limit" — so a series that
+    // ends exactly on a page boundary is not misread as cut off. A known length is
+    // the exact total whatever else `meta.found` claimed. Otherwise the total is
+    // the upstream figure floored at the rows fetched, flagged as a floor when
+    // OpenAQ only gave a ">N" bound, so 5,001 matching rows are distinguishable
+    // from 500,000. Rows sliced off at the ceiling still count toward the total —
+    // they prove the series is longer — but leave the pull incomplete.
+    const fetchedCount = fetched.length;
+    const rows = fetched.slice(0, MAX_ROWS);
+    const pulledCount = rows.length;
+    const lengthKnown = exhausted || (!foundIsLowerBound && found === fetchedCount);
+    const pullComplete = lengthKnown && fetchedCount <= MAX_ROWS;
+    const totalCount = lengthKnown ? fetchedCount : Math.max(found, fetchedCount);
+    const totalCountIsLowerBound = !lengthKnown && foundIsLowerBound;
     ctx.enrich.total(totalCount);
     if (totalCountIsLowerBound) ctx.enrich({ totalCountIsLowerBound: true });
 
-    if (pulledCount >= MAX_ROWS) {
+    if (failure && !pullComplete) {
+      notices.pull = `Series is partial — page ${failure.page} failed (${failure.message}), so it stops at ${pulledCount} rows. OpenAQ times out once the page offset gets deep; pull the rest in shorter date windows${coarser ? ', or use a coarser aggregation so the whole span fits in fewer pages' : ''}.`;
+    } else if (!pullComplete) {
       // There is no page/offset input, so the rows past the cap are reachable
       // only by re-slicing the range — which nothing else in the response says.
       // A total no higher than the rows in hand adds nothing to "not complete".
@@ -465,9 +699,57 @@ export const getMeasurements = tool('openaq_get_measurements', {
         totalCount > pulledCount
           ? ` of ${totalCountIsLowerBound ? 'at least ' : ''}${totalCount}`
           : '';
-      notices.push(
-        `Pull capped at ${MAX_ROWS} rows${ofTotal} — this series is not complete. Split the date range into shorter windows, or use hourly/daily aggregation to fit the whole span under the cap.`,
+      notices.pull = `Pull capped at ${MAX_ROWS} rows${ofTotal} — this series is not complete. Split the date range into shorter windows${coarser ? `, or use ${coarser} aggregation to fit the whole span under the cap` : ' to reach the rest'}.`;
+    }
+
+    if (input.aggregation !== 'raw') {
+      const unit = input.aggregation === 'daily' ? 'day' : 'hour';
+      const first = rows.reduce((a, b) =>
+        Date.parse(b.datetimeFrom) < Date.parse(a.datetimeFrom) ? b : a,
       );
+      const last = rows.reduce((a, b) =>
+        Date.parse(b.datetimeTo) > Date.parse(a.datetimeTo) ? b : a,
+      );
+      const startsEarly =
+        datetimeFrom !== undefined && Date.parse(first.datetimeFrom) < Date.parse(datetimeFrom);
+      const endsLate =
+        datetimeTo !== undefined && Date.parse(last.datetimeTo) > Date.parse(datetimeTo);
+      const edges = [
+        startsEarly
+          ? `the first bucket (${first.datetimeFrom} → ${first.datetimeTo}) starts before datetimeFrom`
+          : '',
+        endsLate
+          ? `the last bucket (${last.datetimeFrom} → ${last.datetimeTo}) ends after datetimeTo`
+          : '',
+      ].filter(Boolean);
+      if (edges.length > 0) {
+        // Date-only bounds are the fix only for an edge an explicit timestamp cut,
+        // and only when the station's zone is known. A date-only edge that still
+        // clips is OpenAQ's own bucket overrunning the day (the 47-hour bucket
+        // before spring-forward); a zone-less station is covered by the timezone
+        // segment. Hourly buckets follow local hours too — :15 UTC at UTC+05:45.
+        const cutByTimestamp =
+          (startsEarly && !isDateOnly(fromInput)) || (endsLate && !isDateOnly(toInput));
+        const hint =
+          cutByTimestamp && formatter
+            ? " Date-only bounds align with the station's local days and hours."
+            : '';
+        notices.clipped = `The range clips its edge ${edges.length > 1 ? 'buckets' : 'bucket'}: ${edges.join(' and ')}, so ${edges.length > 1 ? 'each' : 'that bucket'} aggregates only the ${input.aggregation === 'daily' ? 'hours' : 'readings'} inside the range, not a whole ${unit}.${hint}`;
+      }
+
+      const gaps = findGaps(rows);
+      ctx.enrich({
+        gapCount: gaps.length,
+        ...(gaps.length > 0 && { gaps: gaps.slice(0, MAX_LISTED_GAPS) }),
+      });
+      const [firstGap] = gaps;
+      if (firstGap) {
+        const span = `${firstGap.datetimeFrom} → ${firstGap.datetimeTo}`;
+        notices.gaps =
+          gaps.length === 1
+            ? `1 missing interval among the ${pulledCount} ${input.aggregation} buckets pulled: ${span}.`
+            : `${gaps.length} missing intervals among the ${pulledCount} ${input.aggregation} buckets pulled, the first ${span}.${gaps.length > MAX_LISTED_GAPS ? ` The gaps field lists the first ${MAX_LISTED_GAPS} of ${gaps.length}.` : ''}`;
+      }
     }
 
     const parameterOut = {
@@ -476,10 +758,16 @@ export const getMeasurements = tool('openaq_get_measurements', {
       unit: sensor.parameter.units,
       displayName: sensor.parameter.displayName,
     };
-    const locationOut = { id: location.id, name: location.name ?? `location ${location.id}` };
+    const locationOut = {
+      id: location.id,
+      name: location.name ?? `location ${location.id}`,
+      provider: location.provider?.name ?? null,
+      providerId: location.provider?.id ?? null,
+      timezone: location.timezone,
+    };
 
     const overflow = pulledCount > PREVIEW_ROWS;
-    const previewRows = overflow ? allRows.slice(0, PREVIEW_ROWS) : allRows;
+    const previewRows = overflow ? rows.slice(0, PREVIEW_ROWS) : rows;
     const base = {
       location: locationOut,
       parameter: parameterOut,
@@ -512,11 +800,9 @@ export const getMeasurements = tool('openaq_get_measurements', {
       // it: the rows are already fetched either way.
       const canvas = getCanvas();
       if (!canvas) {
-        notices.push(
-          overflow
-            ? `${notReused}DataCanvas is not enabled (CANVAS_PROVIDER_TYPE=duckdb), so ${inlineState}. Enable it to query them all, or narrow the range / use daily aggregation. Rows ${PREVIEW_ROWS + 1}–${pulledCount} are not in this response.`
-            : `${notReused}DataCanvas is not enabled (CANVAS_PROVIDER_TYPE=duckdb), so ${inlineState}. Enable it to stage series side by side and query them together.`,
-        );
+        notices.canvas = overflow
+          ? `${notReused}DataCanvas is not enabled (CANVAS_PROVIDER_TYPE=duckdb), so ${inlineState}. Enable it to query them all, or narrow the range${coarser ? ' / use daily aggregation' : ''}. Rows ${PREVIEW_ROWS + 1}–${pulledCount} are not in this response.`
+          : `${notReused}DataCanvas is not enabled (CANVAS_PROVIDER_TYPE=duckdb), so ${inlineState}. Enable it to stage series side by side and query them together.`;
         ctx.log.info('Measurement series not staged (no canvas)', {
           sensorId: sensor.id,
           rows: pulledCount,
@@ -528,19 +814,17 @@ export const getMeasurements = tool('openaq_get_measurements', {
           // Idempotent re-stage when reusing a canvas. `drop` reports whether a
           // table was actually removed — that is the replacement to disclose.
           const replaced = await instance.drop(tableName);
-          const handle = await instance.registerTable(tableName, allRows, { signal: ctx.signal });
+          const handle = await instance.registerTable(tableName, rows, { signal: ctx.signal });
           spill = { canvasId: instance.canvasId, tableName: handle.tableName };
           // The response that mints the handle is where an agent learns the
           // handle exists. describe() comes first because the staged table is
           // flat (min, sd) while `series` is nested (summary.min), so SQL written
           // from the response shape alone names columns that do not exist.
-          notices.push(
-            `Series staged on this canvas as table ${handle.tableName} (${handle.rowCount} rows). Call openaq_dataframe_describe with this canvas_id to see the table's columns, then openaq_dataframe_query to run SQL over it.${
-              replaced
-                ? ` This replaced the earlier ${handle.tableName} series staged on the canvas — one table per sensor, so re-staging the same sensor overwrites it.`
-                : ''
-            }`,
-          );
+          notices.canvas = `Series staged on this canvas as table ${handle.tableName} (${handle.rowCount} rows). Call openaq_dataframe_describe with this canvas_id to see the table's columns, then openaq_dataframe_query to run SQL over it.${
+            replaced
+              ? ` This replaced the earlier ${handle.tableName} series staged on the canvas — one table per sensor, so re-staging the same sensor overwrites it.`
+              : ''
+          }`;
           ctx.log.info('Measurement series staged on canvas', {
             sensorId: sensor.id,
             canvasId: instance.canvasId,
@@ -567,14 +851,13 @@ export const getMeasurements = tool('openaq_get_measurements', {
             rows: pulledCount,
             error: err instanceof Error ? err.message : String(err),
           });
-          notices.push(
-            `${notReused}DataCanvas is configured but could not stage the series (${err instanceof Error ? err.message : String(err)}), so ${inlineState}. ${overflow ? 'Narrow the range or use daily aggregation to fit the series inline, or fix' : 'Fix'} the canvas provider to stage it.`,
-          );
+          notices.canvas = `${notReused}DataCanvas is configured but could not stage the series (${err instanceof Error ? err.message : String(err)}), so ${inlineState}. ${overflow ? `Narrow the range${coarser ? ' or use daily aggregation' : ''} to fit the series inline, or fix` : 'Fix'} the canvas provider to stage it.`;
         }
       }
     }
 
-    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
+    const notice = Object.values(notices).filter(Boolean).join(' ');
+    if (notice) ctx.enrich.notice(notice);
 
     return {
       ...base,
@@ -584,10 +867,18 @@ export const getMeasurements = tool('openaq_get_measurements', {
   },
 
   format: (result) => {
-    const head = `## ${result.location.name} (id ${result.location.id}) — ${result.parameter.displayName ?? result.parameter.name} (\`${result.parameter.name}\` #${result.parameter.id}, ${result.parameter.unit})`;
+    const { location } = result;
+    const head = `## ${location.name} (id ${location.id}) — ${result.parameter.displayName ?? result.parameter.name} (\`${result.parameter.name}\` #${result.parameter.id}, ${result.parameter.unit})`;
+    const station = `provider: ${location.provider === null ? 'not listed by OpenAQ' : `${location.provider} (providerId ${location.providerId})`} · timezone: ${location.timezone ?? 'not listed by OpenAQ'}`;
 
     const pull = `${result.pulledCount} pulled · pull ${result.pullComplete ? 'complete' : 'incomplete'}`;
-    const meta = `aggregation: ${result.aggregation} · sensor ${result.sensorId} · ${result.rowCount} rows shown · ${pull}`;
+    const days =
+      result.aggregation !== 'daily'
+        ? ''
+        : location.timezone === null
+          ? " · days follow OpenAQ's station-local calendar; the station timezone is not listed"
+          : ` · daily buckets are local calendar days in ${location.timezone}`;
+    const meta = `aggregation: ${result.aggregation}${days} · sensor ${result.sensorId} · ${result.rowCount} rows shown · ${pull}`;
 
     // The canvas pointer stands on canvasId; the Truncated label stands on
     // truncated. A supplied canvas_id stages a series that fits inline, so the
@@ -615,6 +906,6 @@ export const getMeasurements = tool('openaq_get_measurements', {
       })
       .join('\n');
 
-    return [{ type: 'text', text: [head, meta + spill, '', rows].join('\n') }];
+    return [{ type: 'text', text: [head, station, meta + spill, '', rows].join('\n') }];
   },
 });

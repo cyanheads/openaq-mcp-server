@@ -20,8 +20,8 @@ export interface OpenAqMeta {
    * Not a total on every endpoint (measured 2026-09-23). On `/v3/locations` it
    * counts only the page returned: `">limit"` whenever the page is full — even
    * when no later page holds anything — and the page's own row count otherwise
-   * (`0` past the end). On the sensor measurements endpoints it is a total across
-   * pages, with `">N"` as a lower bound.
+   * (`0` past the end). Raw sensor measurements behave the same way. On the
+   * `/hourly` and `/daily` measurement rollups it is the exact total across pages.
    */
   found?: number | string;
   limit?: number;
