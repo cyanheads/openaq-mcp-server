@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-24 · ⚠️ Breaking
+
+openaq_get_measurements reads a date-only bound as the station's local calendar day and reports the bounds sent, clipped edge buckets, and missing intervals; openaq_get_readings picks the nearest station from up to 1,000 candidates; missing coordinates, country, and provider stay null.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-23 · ⚠️ Breaking
 
 openaq_find_locations rejects contradictory search scopes, derives paging from its rows, and gains station-class and provider filters; openaq_list_countries pages its catalog 20 rows at a time; non-positive ids fail at the schema.
