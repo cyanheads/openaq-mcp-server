@@ -13,7 +13,7 @@ actual reading from a physical monitor — sparser, unevenly distributed, but re
 | Name | Description | Key Inputs | Annotations |
 |:-----|:------------|:-----------|:------------|
 | `openaq_find_locations` | Find air-quality monitoring stations (measured, not modeled) near a point, in a bounding box, or by country. Returns location id, name, coordinates, distance, country, provider, the parameters each measures, and `datetimeLast`. Required first step — readings and measurements key on the location/sensor ids this returns. A missing station means no coverage, not clean air. | `coordinates`, `radius`, `bbox`, `iso`, `parametersId`, `monitor`, `mobile`, `providersId`, `limit`, `page` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
-| `openaq_get_readings` | Latest measured value for every sensor at a location (or the nearest location to coordinates). Returns per parameter: value, unit, UTC + local timestamp, and the sensor id — joined so each value carries its pollutant and unit. The current-conditions tool. Recency varies by station; each value's timestamp shows whether "latest" is minutes or hours old. | `locationId` \| (`coordinates` + `parametersId`), `parametersId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
+| `openaq_get_readings` | Latest measured value for every sensor at a location (or the nearest location to coordinates). Returns per parameter: value, unit, UTC + local timestamp, and the sensor id — joined so each value carries its pollutant and unit — plus the station's provider and timezone. The current-conditions tool. Recency varies by station; each value's timestamp shows whether "latest" is minutes or hours old. | `locationId` \| (`coordinates` + `parametersId`), `parametersId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
 | `openaq_get_measurements` | Historical measurement series for one parameter at a location over a date range. Resolves the location's sensor for that parameter internally (measurements are sensor-scoped in v3) so you pass a location, not a sensor. Optional `aggregation` (`raw`/`hourly`/`daily`) — `daily` adds a per-day statistical summary. The pulled rows stage on a DataCanvas when the series overflows the inline preview or a `canvas_id` was supplied; the response carries `canvasId` + `tableName` and names the path to read them — `openaq_dataframe_describe`, then `openaq_dataframe_query`. | `locationId`, `parametersId`, `datetimeFrom`, `datetimeTo`, `aggregation`, `canvasId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
 | `openaq_list_parameters` | Catalog of measurable pollutants and their canonical units: id, code, display name, unit, description (pm25, pm10, o3, no2, so2, co, bc, …). The unit-disambiguation tool — the same pollutant exists under several ids with different units (`co` is id 4 µg/m³, id 8 ppm, id 102 ppb). Call this to pick the right `parametersId` and to interpret a reading's unit. | `query` (local filter), `pollutantsOnly` | `readOnlyHint`, `idempotentHint` |
 | `openaq_list_countries` | Catalog of country coverage: id, OpenAQ country code, name, station-data date span (`datetimeFirst`/`datetimeLast`), and the parameters measured anywhere in that country. Availability check before a regional `openaq_find_locations` sweep — answers "which countries have NO2 monitoring?". Pages the filtered catalog. | `query`, `parametersId` (local filters), `limit`, `page` | `readOnlyHint`, `idempotentHint` |
@@ -260,6 +260,29 @@ Sensor-scoped — the whole reason `get_measurements` resolves a sensor internal
 q98, max, avg, sd }` — and `period.label: "1 day"`. Aggregation endpoints accept
 `datetime_from`/`datetime_to` as date strings.
 
+Bucket boundaries (live-probed 2026-09-23 at station 931, `America/Los_Angeles`):
+
+- **Hours are labeled by their end, and `datetime_to` is inclusive.** An hour is selected when
+  its end falls after `datetime_from` and at or before `datetime_to`, so a `…T23:59:59Z` upper
+  bound drops the day's last hour; the next midnight keeps it. A raw `18:00→19:00Z` row comes back
+  for `datetime_from=…T18:15:00Z` (station 2848864, `Asia/Kathmandu`), so the start is not the
+  test.
+- **Hourly buckets follow local hours.** At UTC+05:45 (2848864) they open at :15 UTC, so a
+  date-only bound's local midnight lines up with them there as at 931; raw rows keep their own
+  UTC periods.
+- **A daily bucket is the station's local calendar day** (`2026-08-01T07:00Z → 08-02T07:00Z` at
+  931), aggregated over the in-window hours only. A window that cuts a local day returns that day
+  as a clipped bucket whose value covers just the hours inside it.
+- **DST lives in the boundaries.** The fall-back day is one 25-hour bucket, the repeated hour a
+  2-hour bucket (`percentComplete` 50, then 200 on the next hour), and spring-forward leaves the
+  UTC hours contiguous. Around spring-forward OpenAQ also returns the day before as a 47-hour
+  bucket overlapping the next one.
+- **Missing time is skipped** in hourly and raw series at 931; other sensors return a bucket
+  with a null `value` instead (sensor 3425, #11). Raw rows follow no fixed cadence (a low-cost
+  sensor's 5-minute periods start ~5m43s apart), so only hourly/daily series define a gap.
+- **`meta.found`** is an exact series total on `/hourly` and `/daily`. On raw it is `">limit"`
+  on a full page and the page's own row count on a short one, so it is never a raw total.
+
 ### The sensor-resolution flow (the central UX move)
 
 `openaq_get_measurements(locationId, parametersId, …)`:
@@ -334,13 +357,13 @@ since OpenAQ also 500s on `coordinates` without a `radius`.
     country: z.object({
       code: z.string().describe('OpenAQ country code: ISO 3166-1 alpha-2, or "-99" where OpenAQ lists none'),
       name: z.string().describe('Country name'),
-    }).describe('Country the station is in'),
+    }).nullable().describe('Country the station is in. Null when OpenAQ lists none.'),
     coordinates: z.object({
       latitude: z.number().describe('Station latitude (decimal degrees)'),
       longitude: z.number().describe('Station longitude (decimal degrees)'),
-    }).describe('Station location'),
+    }).nullable().describe('Station location. Null when OpenAQ lists no latitude or no longitude.'),
     distanceMeters: z.number().nullable().describe('Distance from the query coordinates in metres. Null when searching by bbox or iso (no center point).'),
-    provider: z.string().describe('Data provider / network (e.g. "AirNow", "OpenAQ LCS")'),
+    provider: z.string().nullable().describe('Data provider / network (e.g. "AirNow", "OpenAQ LCS"). Null when OpenAQ lists none.'),
     providerId: z.number().nullable().describe('OpenAQ provider id — pass as providersId to restrict a search to this network. Null when OpenAQ lists no provider.'),
     isMonitor: z.boolean().describe('True for reference-grade government monitors; false for low-cost sensors. Reference monitors are more reliable for regulatory comparison.'),
     isMobile: z.boolean().describe('True if the station is mobile (coordinates may vary over time)'),
@@ -397,7 +420,8 @@ errors: [
 **Description:** Latest measured value for every sensor at a monitoring station — the
 current-conditions tool. Returns one record per parameter, each with the value, its unit, the UTC
 and local timestamp, and the sensor id, joined so every value carries its pollutant and unit (the
-raw latest feed is keyed only by sensor id). Pass a `locationId` from `openaq_find_locations`, or
+raw latest feed is keyed only by sensor id). The station block names its provider (for
+attribution) and timezone. Pass a `locationId` from `openaq_find_locations`, or
 pass `coordinates` to auto-resolve to the nearest station that measures the requested
 `parametersId`. Data recency varies by station reporting cadence — read each value's timestamp to
 know whether "latest" is minutes or hours old. These are measured observations with coverage gaps,
@@ -415,8 +439,13 @@ not a modeled grid.
 }
 ```
 Handler: exactly one of `locationId` / `coordinates` required; `coordinates` requires
-`parametersId`. The `coordinates` path is `find_locations(coordinates, radius:25000, parametersId,
-limit:1)` → nearest location → readings on it.
+`parametersId`. The `coordinates` path is `findLocations(coordinates, radius:25000, parametersId,
+limit:1000)` → the service's distance sort puts the nearest of that page at `results[0]` → readings
+on it. `/v3/locations` pages in ascending id order, so the pool is OpenAQ's page maximum; a page
+that comes back full (1,000 rows) sets a `notice` that the station is the nearest of the first
+1,000 OpenAQ lists, not necessarily the nearest overall. Missing upstream values stay null:
+`coordinates` unless both latitude and longitude are numbers, `provider`/`providerId` when OpenAQ
+lists no provider.
 
 **Output schema:**
 ```ts
@@ -426,7 +455,9 @@ limit:1)` → nearest location → readings on it.
     name: z.string().describe('Station name'),
     coordinates: z.object({
       latitude: z.number(), longitude: z.number(),
-    }).describe('Station coordinates'),
+    }).nullable().describe('Station coordinates. Null when OpenAQ lists no latitude or no longitude.'),
+    provider: z.string().nullable().describe('Network that operates the station (e.g. "AirNow") — cite it alongside OpenAQ. Null when OpenAQ lists none.'),
+    providerId: z.number().nullable().describe('Provider id, usable as providersId in openaq_find_locations. Null when OpenAQ lists none.'),
     timezone: z.string().nullable().describe('IANA timezone of the station'),
     distanceMeters: z.number().nullable().describe('Distance from query coordinates in metres, when resolved via coordinates; null when called by locationId'),
     datetimeLast: z.object({
@@ -447,6 +478,8 @@ limit:1)` → nearest location → readings on it.
     datetimeLocal: z.string().describe('Measurement time in the station\'s local timezone'),
   })).describe('Latest value per sensor. An old datetime means the station reports infrequently or is stale — not that the value is current.'),
 }
+// enrichment: notice — only when coordinate resolution compared a full 1,000-station page, so the
+// station is the nearest of the first 1,000 OpenAQ lists, not necessarily the nearest overall.
 ```
 
 **Errors:**
@@ -456,24 +489,31 @@ errors: [
     when: 'The locationId does not exist (API returns {"detail":"Location not found"})',
     recovery: 'Verify the id via openaq_find_locations.',
     retryable: false },
+  { reason: 'parameter_not_at_location', code: JsonRpcErrorCode.NotFound,   // data { locationId, parametersId, available }
+    when: 'No sensor at the resolved station measures parametersId (often the wrong unit variant was chosen)',
+    recovery: 'Pick one of the ids listed in data.available, or confirm the id and its unit in openaq_list_parameters — the same pollutant has different ids for µg/m³ vs ppm vs ppb.',
+    retryable: false },
   { reason: 'no_station_near_coordinates', code: JsonRpcErrorCode.NotFound,
-    when: 'No station within 25km of coordinates measures the requested parametersId',
-    recovery: 'Widen your search with openaq_find_locations (radius up to 25000m), try a different parametersId, or use the modeled open-meteo air-quality tool for coverage. No station does not mean clean air.',
+    when: 'The 25km auto-resolution sweep found no station measuring the requested parametersId',
+    recovery: 'Try a different parametersId, sweep a wider area with an openaq_find_locations bbox query, or fall back to the modeled open-meteo air-quality tool. No station does not mean clean air.',
     retryable: false },
   { reason: 'no_recent_values', code: JsonRpcErrorCode.NotFound,
-    when: 'The station exists but its latest feed returned no values (no recent reporting)',
+    when: 'The station has the requested sensors but its latest feed carried no values for them',
     recovery: 'Check datetimeLast from openaq_find_locations; the station may be dormant. Try a nearby station.',
+    retryable: false },
+  { reason: 'invalid_location_scope', code: JsonRpcErrorCode.ValidationError,
+    when: 'Both locationId and coordinates were provided, or neither was',
+    recovery: 'Pass exactly one — a locationId from openaq_find_locations to read a known station, or coordinates plus parametersId to auto-resolve the nearest one.',
     retryable: false },
   { reason: 'missing_coordinates_parameter', code: JsonRpcErrorCode.ValidationError,
     when: 'coordinates was provided without parametersId',
     recovery: 'Provide parametersId so the nearest matching station can be resolved, or pass a locationId instead.',
     retryable: false },
-  { reason: 'upstream_error', code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'OpenAQ returned 5xx, a rate-limit (429), or timed out',
-    recovery: 'Retry after a short backoff.',
-    retryable: true },
+  // plus upstream_error / rate_limited / upstream_timeout / invalid_api_key, thrownBy: 'service'
 ]
 ```
+The sweep already runs at OpenAQ's 25000 m radius ceiling, so the `no_station_near_coordinates`
+recovery never suggests widening the radius.
 
 ---
 
@@ -496,13 +536,13 @@ carry their unit; the server never converts between µg/m³, ppm, and ppb.
   parametersId: z.number().int().positive()
     .describe('Parameter id to pull the series for (e.g. 2 = PM2.5 µg/m³). Get ids from openaq_list_parameters. Must be a parameter the station measures — find_locations lists each station\'s parameters.'),
   datetimeFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$/).optional()
-    .describe('Start of the range, inclusive. Date "YYYY-MM-DD" or full UTC "YYYY-MM-DDTHH:MM:SSZ". Omit to get the most recent values.'),
+    .describe('Start of the range, inclusive. A date "YYYY-MM-DD" opens at local midnight of that day in the station\'s timezone (UTC midnight when OpenAQ lists none); a full UTC timestamp is sent as is. Omit to start from the sensor\'s earliest data — the series runs oldest first, so set datetimeFrom to reach recent values.'),
   datetimeTo: z.string().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$/).optional()
-    .describe('End of the range, inclusive. Must be on or after datetimeFrom. Omit for "up to now".'),
+    .describe('End of the range, inclusive. A date covers that whole station-local day, closing at the next local midnight (23 or 25 hours on a DST day); a timestamp is sent as is. Must land after datetimeFrom. Omit for "up to now".'),
   aggregation: z.enum(['raw', 'hourly', 'daily']).default('raw')
     .describe('Time bucketing. "raw" = every reported value (often hourly at source). "hourly"/"daily" = server-side rollups with a statistical summary per bucket. Use "daily" for multi-month trends to keep the series small; "raw" for fine-grained recent analysis.'),
   limit: z.number().int().min(1).max(1000).default(1000)
-    .describe('Max rows per page from the API (1–1000). Default 1000. The tool pages internally up to the spill threshold.'),
+    .describe('Max rows per page from the API (1–1000). Default 1000. The tool pages internally up to the 5000-row pull ceiling.'),
   canvas_id: z.string().optional()
     .describe('DataCanvas id from a prior call to reuse the same canvas (e.g. to compare two stations\' series side by side). Omit to start fresh; the response returns a new canvas_id when the series spills.'),
 }
@@ -514,6 +554,9 @@ carry their unit; the server never converts between µg/m³, ppm, and ppb.
   location: z.object({
     id: z.number().describe('Station id'),
     name: z.string().describe('Station name'),
+    provider: z.string().nullable().describe('Network that operates the station. Null when OpenAQ lists none.'),
+    providerId: z.number().nullable().describe('Provider id, usable as providersId in openaq_find_locations'),
+    timezone: z.string().nullable().describe('IANA timezone; daily buckets and date-only bounds follow its calendar days'),
   }).describe('Station the series came from'),
   parameter: z.object({
     id: z.number().describe('Parameter id'),
@@ -526,24 +569,27 @@ carry their unit; the server never converts between µg/m³, ppm, and ppb.
   series: z.array(z.object({
     datetimeFrom: z.string().describe('Bucket start, UTC (ISO 8601)'),
     datetimeTo: z.string().describe('Bucket end, UTC (ISO 8601)'),
-    value: z.number().describe('Value for the bucket (the measurement for raw; the bucket aggregate for hourly/daily)'),
+    value: z.number().nullable().describe('Value for the bucket (the measurement for raw; the bucket aggregate for hourly/daily). Null for a gap bucket the sensor reported nothing into'),
     summary: z.object({
-      min: z.number(), median: z.number(), max: z.number(),
-      avg: z.number(), sd: z.number().nullable().describe('Standard deviation — null when only one reading in the bucket'),
-    }).nullable().describe('Per-bucket statistics — present for hourly/daily, null for raw'),
-    percentComplete: z.number().nullable().describe('Coverage of the bucket (0–100); low values flag gappy data'),
+      min: z.number().nullable(), median: z.number().nullable(), max: z.number().nullable(),
+      avg: z.number().nullable(), sd: z.number().nullable().describe('Standard deviation — null when only one reading in the bucket'),
+    }).nullable().describe('Per-bucket statistics — present for hourly/daily, null for raw. Every field is null in a gap bucket'),
+    percentComplete: z.number().nullable().describe('Observed readings as a percentage of expected; usually 0–100, 200 on a DST fall-back hour'),
     flagged: z.boolean().describe('True if the source flagged this value (quality concern)'),
-  })).describe('The (possibly previewed) series, newest or oldest first per the API. When truncated, this is a preview of pulledCount rows — query canvasId for the rest.'),
+  })).describe('The (possibly previewed) series in the order OpenAQ returns it (oldest first). When truncated, this is a preview of pulledCount rows — query canvasId for the rest.'),
   rowCount: z.number().describe('Rows in this response (preview length when spilled)'),
-  pulledCount: z.number().describe('Rows pulled from OpenAQ — the canvas table\'s row count when canvasId is present'),
-  pullComplete: z.boolean().describe('True when the pager reached the end of the range; false when the 5000-row cap or a failed page stopped it early'),
+  pulledCount: z.number().describe('Rows pulled from OpenAQ, at most 5000 — the canvas table\'s row count when canvasId is present'),
+  pullComplete: z.boolean().describe('True when pulledCount is the whole series for the range; false when the 5000-row cap or a failed page stopped it early'),
   // DataCanvas staging fields — optional, present only when staging succeeded:
   canvasId: z.string().optional().describe('DataCanvas id holding the staged series — pulledCount rows of it. Call openaq_dataframe_describe on this id for the table\'s columns, then openaq_dataframe_query to run SQL.'),
   tableName: z.string().optional().describe('Canvas table holding the staged series (e.g. "measurements_1701"). One table per sensor, so re-staging the same sensor on this canvas overwrites it.'),
   truncated: z.boolean().optional().describe('True when the series exceeded the inline limit, so series is a preview of the pulled rows. Describes the preview only — canvasId reports staging, pullComplete reports the pull.'),
 }
 // enrichment: totalCount (rows in the full series for this range; a floor when
-// totalCountIsLowerBound is set), totalCountIsLowerBound, notice
+// totalCountIsLowerBound is set), totalCountIsLowerBound, effectiveRange
+// ({ datetimeFrom, datetimeTo } UTC instants sent upstream, null when omitted),
+// gapCount (hourly/daily only; 0 when complete), gaps (first 20 missing
+// { datetimeFrom, datetimeTo } spans; omitted at 0), notice
 ```
 
 **Errors:**
@@ -562,13 +608,14 @@ errors: [
     recovery: 'Widen the range or check the station\'s datetimeFirst/datetimeLast from openaq_find_locations.',
     retryable: false },
   { reason: 'invalid_date_range', code: JsonRpcErrorCode.ValidationError,
-    when: 'datetimeTo is before datetimeFrom',
-    recovery: 'Ensure datetimeTo is on or after datetimeFrom.',
+    when: 'Once date-only bounds are expanded to the station\'s local day, datetimeTo does not land after datetimeFrom',
+    recovery: 'Move datetimeTo to a later instant than datetimeFrom; a date-only bound spans the whole station-local day.',
     retryable: false },
-  { reason: 'upstream_error', code: JsonRpcErrorCode.ServiceUnavailable,
-    when: 'OpenAQ returned 5xx, a rate-limit (429), or timed out',
-    recovery: 'Retry after a short backoff.',
-    retryable: true },
+  { reason: 'canvas_not_found', code: JsonRpcErrorCode.NotFound,
+    when: 'The supplied canvas_id is unknown or has expired, so the series cannot be staged onto it',
+    recovery: 'Omit canvas_id to stage the series on a fresh canvas, or re-run the call that produced the id you meant to reuse.',
+    retryable: false },
+  // plus upstream_error / rate_limited / upstream_timeout / invalid_api_key, thrownBy: 'service'
 ]
 ```
 **Canvas degraded mode (not a thrown error):** When `CANVAS_PROVIDER_TYPE` is not `duckdb` and the
@@ -638,7 +685,7 @@ Results come a page at a time (20 countries by default); `totalCount` is the ful
 ```ts
 {
   query: z.string().optional()
-    .describe('Case-insensitive filter over the country catalog by code and name. A two-letter query is treated as an exact ISO 3166-1 alpha-2 code (e.g. "US" → United States); longer queries match as substrings (e.g. "united", "germany"). Omit to page through the whole catalog.'),
+    .describe('Case-insensitive filter over the country catalog by code and name. A two-letter query matches an exact ISO 3166-1 alpha-2 code first (e.g. "US" → United States) and falls back to substrings when no code matches; longer queries match as substrings (e.g. "united", "germany"). Omit to page through the whole catalog.'),
   parametersId: z.number().int().positive().optional()
     .describe('Only return countries that measure this parameter id somewhere (e.g. 2 = PM2.5 µg/m³) — the one-call answer to "which countries have NO2 monitoring?". Get ids from openaq_list_parameters; the same pollutant has several ids for different units. Composes with query.'),
   limit: z.number().int().min(1).max(100).default(20)
@@ -748,8 +795,8 @@ non-truncated result):
 | Tool | Required enrichment | Optional enrichment (cap-hit only) |
 |:-----|:--------------------|:-----------------------------------|
 | `openaq_find_locations` | `totalCount` (stations counted through this page, `(page − 1) × limit + rows`; exact on a short page) | On a full page: `totalCountIsLowerBound` (at least `totalCount` match), `truncated` / `shown` / `cap`, and a `notice` naming the next page |
-| `openaq_get_readings` | — (returns all sensors at one location; not a capped list) | — |
-| `openaq_get_measurements` | `totalCount` (rows in the full series; a floor when the pull stopped early and OpenAQ gave `">N"`) | `totalCountIsLowerBound` (that floor case), `notice` (row cap, failed page, canvas unavailable, or where the series was staged) |
+| `openaq_get_readings` | — (returns all sensors at one location; not a capped list) | `notice` when coordinate resolution compared a full 1,000-station page (nearest of the first 1,000, not necessarily overall) |
+| `openaq_get_measurements` | `totalCount` (rows in the full series; a floor when the pull stopped early and OpenAQ gave `">N"`), `effectiveRange` (UTC bounds sent upstream) | `totalCountIsLowerBound` (that floor case), `gapCount` (every hourly/daily response) and `gaps` (first 20, when any), `notice` (row cap, failed page, station with no timezone, clipped edge bucket, missing intervals, canvas unavailable, or where the series was staged — composed into one string, since `notice` is last-wins) |
 | `openaq_list_parameters` | `totalCount` | `notice` when `query` matches nothing |
 | `openaq_list_countries` | `totalCount` (countries matched after `query` / `parametersId`, across every page) | When rows remain past the page: `truncated` / `shown` / `cap` and a `notice` naming the next page. `notice` alone when the filters match nothing or the page is past the last one |
 
@@ -790,25 +837,30 @@ projected onto both surfaces. The `capped-list-no-truncation` linter enforces di
 
 | # | Call | Purpose | Path gate |
 |:--|:-----|:--------|:----------|
-| 1 | `GET /v3/locations?coordinates={lat,lon}&radius=25000&parameters_id={id}&limit=1` | Resolve nearest station measuring the parameter | `coordinates` path only |
+| 1 | `GET /v3/locations?coordinates={lat,lon}&radius=25000&parameters_id={id}&limit=1000` | Candidate pool, sorted by distance in the service; `results[0]` is the nearest station measuring the parameter. A full 1,000-row page adds the nearest-of-the-first-1,000 `notice` | `coordinates` path only |
 | 2 | `GET /v3/locations/{id}` | Sensor→parameter→unit map | always |
 | 3 | `GET /v3/locations/{id}/latest` | Latest values keyed by sensorsId | always |
 | — | Join 3 against 2 on `sensorsId` | Attach parameter + unit to each value | always |
 
 When called by `locationId`, step 1 is skipped (2 calls). Steps 2 and 3 run in `Promise.all`. The
-free-tier budget (~60 req/min) is the reason this is a fixed 2–3 calls and never fans out per sensor.
+free-tier budget (~60 req/min) is the reason this is a fixed 2–3 calls and never fans out per sensor
+or pages past step 1's first page.
 
 ### `openaq_get_measurements` (2–N upstream calls + optional spill)
 
 | # | Call | Purpose |
 |:--|:-----|:--------|
 | 1 | `GET /v3/locations/{locationId}` | Find the sensor whose `parameter.id === parametersId` |
-| 2…N | `GET /v3/sensors/{sensorId}/measurements[/hourly\|/daily]?datetime_from=…&datetime_to=…&page=…` | Pull the series, paging until the spill threshold or the range is exhausted |
+| 2…N | `GET /v3/sensors/{sensorId}/measurements[/hourly\|/daily]?datetime_from=…&datetime_to=…&page=…` | Pull the series, paging until the 5000-row ceiling or the range is exhausted |
 | spill | `spillover()` → register `measurements_<sensorId>` on the canvas | Stage the full set when it exceeds the inline preview |
 
 Surfaces the design question: cap internal paging so an unbounded `raw` range over years doesn't
-loop forever — page up to a row ceiling (e.g. 5×1000), then rely on the canvas + `totalCount` to
-tell the agent the series is larger and steer it to `daily` aggregation or a narrower range.
+loop forever — page up to a row ceiling (5000), then rely on the canvas + `totalCount` to
+tell the agent the series is larger and steer it to `daily` aggregation or a narrower range. A
+`limit` that does not divide the ceiling overshoots on the last page; the excess is sliced off
+before counting or staging, and still counts toward `totalCount`. A rollup series that ends
+exactly on the ceiling is recognized as complete from its exact `meta.found`, with no extra
+request to prove the end.
 
 ---
 
@@ -912,8 +964,8 @@ Pagination is `page` + `limit` (1-based).
 |:-------|:-----|:------|:--------|
 | 404 | `{"detail":"Location not found"}` (clean JSON) | Unknown location id | `NotFound` (`location_not_found`) |
 | 422 | `"[{'type': '...', 'loc': ..., 'msg': '...'}]"` (**Content-Type: application/json but body is a JSON string wrapping a Python repr** — NOT a JSON array) | Out-of-range param (e.g. `radius=26000`) | `ValidationError` — `JSON.parse(body)` yields a `string`; regex-extract `msg` value from it |
-| 401 | — | Missing / invalid `X-API-Key` | `ConfigurationError` at startup; `ServiceUnavailable`/auth at runtime |
-| 429 | — | Rate limit (>~60/min) | `ServiceUnavailable`, retryable — honor `Retry-After` |
+| 401 | `{"detail":"Invalid credentials"}` (rejected key) or `{"message":"…"}` (missing key) | Missing / invalid `X-API-Key` | `Unauthorized` (`invalid_api_key`), not retried |
+| 429 | — | Rate limit (>~60/min) | `RateLimited` (`rate_limited`), retryable — honor `Retry-After` |
 | **500** | `Internal Server Error` (plain text) | **Unvalidated bad input** (e.g. `coordinates=999,999`) | Defended at the Zod edge; backstop → transient `ServiceUnavailable`, NOT `SerializationError` |
 
 ### Canonical parameter catalog (the units reference — design-time snapshot; `openaq_list_parameters` is the live list)
@@ -997,7 +1049,11 @@ live (not hardcoded) so new parameters appear automatically; this table document
 | 2026-09-23 | **`iso` accepts either case (normalized to uppercase) and OpenAQ's `-99` placeholder**, forwarded unchanged. | OpenAQ matches `iso` case-sensitively, so `"us"` read as no coverage; `-99` is the code `list_countries` returns for Dhekelia and OpenAQ serves it as a filter. |
 | 2026-09-23 | **`monitor`, `mobile`, and `providersId` are forwarded filters, not scopes**; each location carries `providerId`. Single provider id, no filter echo. | Client-side filtering of a page misses matches on later pages; OpenAQ owns these filters. `providerId` makes the filter value readable from a prior result. |
 | 2026-09-23 | **Id inputs are positive at the schema** (`locationId`, `parametersId`, `providersId`); the location resource keeps its handler check and declares `invalid_location_id` as `ValidationError`. | A non-positive `locationId` reached OpenAQ and surfaced its raw 422; a non-positive `parametersId` is accepted upstream as a filter that matches nothing, so it read as missing coverage. No such id exists (both catalogs start at 1), so the bound drops nothing that resolves. A `params` bound on the resource would drop the reason and recovery hint; `ValidationError` is the framework's own code for a rejected resource segment and separates "not an id" from "no such station". |
+| 2026-09-23 | **A date-only bound on `get_measurements` is the station's local calendar day, for every aggregation**: `datetimeFrom` opens at local midnight, `datetimeTo` closes at the next one, resolved from the timezone on the location lookup the handler already makes. Explicit timestamps pass through; a station with no timezone gets UTC days plus a notice. The response echoes `effectiveRange`, flags clipped edge buckets, and reports hourly/daily gaps (`gapCount`, first 20 `gaps`). | OpenAQ's daily buckets are local days and its hours are end-labeled with an inclusive `datetime_to`, so UTC bounds (`T00:00:00Z`…`T23:59:59Z`) returned two clipped partial days whose aggregates looked like real daily values, and dropped the last hour on every aggregation. One rule for all aggregations keeps a daily bucket equal to the hours the same request returns; UTC days for raw/hourly would make "2026-08-01" mean different hours by aggregation. Gaps are read from bucket boundaries, never a fixed step, because OpenAQ already encodes DST as 23/25-hour days and a 2-hour bucket; raw is excluded because its rows follow no cadence. |
+| 2026-09-23 | **The `get_measurements` pull stops at exactly 5,000 rows, and a series counts as complete when the pager saw a short page or an exact `meta.found` matches the rows fetched.** Rows sliced off the last page still count toward the `totalCount` floor. | A `limit` that does not divide 5,000 overshot the ceiling while the cap notice named it. Only the `/hourly` and `/daily` rollups report an exact total; raw answers every full page with `">limit"`, so a rollup ending on the ceiling is recognized as complete with no extra request, while a raw series ending there stays incomplete because nothing proves its end. |
 | 2026-09-23 | **`list_countries` pages the filtered catalog** with `limit` (1–100, default 20) and `page`, in `find_locations`' vocabulary (`totalCount`, optional `truncated`/`shown`/`cap`, `notice`). A page past the end is an empty success naming the last page. No `totalFound`/`returnedCount`/`nextPage` fields, no summary mode. | Reverses the earlier call that the catalog was small enough to return whole: unfiltered it was 158 countries, ~74 KB of `structuredContent`, and `parametersId: 2` still matched 156. A default of 20 keeps a page near 16 KB. The whole catalog is fetched, so the total is exact and the last page is known — a past-end page can name it, and it follows this tool's empty-result convention (success plus notice) rather than `find_locations`' `page_exhausted`, where the end is never known. |
+| 2026-09-23 | **`get_readings` resolves the nearest station from a 1,000-row candidate pool** (OpenAQ's page maximum; 1001 is a 422) and sets a `notice` when that page comes back full. No paging past the first page. | `/v3/locations` sorts only by id, so the earlier 100-row pool held the 100 oldest stations and missed newer, nearer ones: around Los Angeles (PM2.5, 25 km) 283 stations match and the nearest is row 276. The larger page costs extra only when more than 100 match — for LA the response grows from 139 KB to 380 KB (median over five requests 0.49 s → 0.59 s); a Seattle search with 88 matches returns identical bytes. No observed search nears 1,000, so paging on would spend requests against a ~60/min budget for a case never seen; disclosing the full page is the cheaper honest answer. |
+| 2026-09-23 | **Missing upstream location values stay null on the tool surface**: `coordinates` is null unless both latitude and longitude are numbers (`find_locations`, `get_readings`), and `country` and `provider` are null on `find_locations` when OpenAQ lists none. `format()` renders each as "not listed by OpenAQ". | The shapers used to substitute `0`, `XX`, and `Unknown`, which read as a real point in the Gulf of Guinea, a country code, and a provider name. A half-known point cannot be plotted, so a single null side nulls the pair rather than pushing the check onto every caller. Nulls at the object level stay handled even though OpenAQ's schema requires those objects, so one sparse station never fails a whole page. |
 
 ---
 
