@@ -56,12 +56,14 @@ All resource data is also reachable via tools — both resources mirror tool out
 
 ### `openaq_find_locations` <sub>tool</sub>
 
-- Three search scopes — `coordinates` + `radius` (near-me), `bbox` (area sweep), or `iso` country code; at least one is required
-- `radius` is in metres, 1–25000 (the API hard-caps at 25000); larger areas need `bbox`, which returns no distance
+- Search scopes — `coordinates` with an optional `radius` (near-me) or `bbox` (area sweep), and/or an `iso` country code; at least one is required. `coordinates` with `bbox`, or `radius` without `coordinates`, fails with `invalid_search_scope`
+- `radius` is in metres, 1–25000, default 12000 (the API hard-caps at 25000); larger areas need `bbox`, which returns no distance
+- `iso` takes the country code `openaq_list_countries` returns — ISO 3166-1 alpha-2 in either case, or `-99` for the country OpenAQ lists without one
 - `parametersId` narrows to stations that measure a given parameter; each returned station still lists all its sensors
-- `limit` caps at 100 stations per page; `page` (1-based) reaches further pages — distance ordering applies within a page, not across pages
-- Returns each station's id, name, coordinates, distance (coordinate search only), country, provider, `isMonitor`/`isMobile`, its parameters with units, and the `datetimeFirst`/`datetimeLast` data span
-- Empty result means no coverage, not clean air — widen the radius, check `openaq_list_countries`, or fall back to the modeled `open-meteo-mcp-server` air-quality tool
+- `monitor` (reference monitors vs low-cost sensors), `mobile` (mobile vs fixed), and `providersId` (one provider network) narrow further; `false` filters, it does not mean "either"
+- `limit` caps at 100 stations per page; `page` (1-based) reaches further pages — distance ordering applies within a page, not across pages. OpenAQ reports no total for this search, so `totalCount` counts stations through the current page: exact on a short (last) page, an "at least" floor flagged by `totalCountIsLowerBound` on a full one. A page past the end fails with `page_exhausted`
+- Returns each station's id, name, coordinates, distance (coordinate search only), country, provider name and `providerId`, `isMonitor`/`isMobile`, its parameters with units, and the `datetimeFirst`/`datetimeLast` data span
+- An empty first page means no coverage, not clean air — widen the search area, check `openaq_list_countries`, or fall back to the modeled `open-meteo-mcp-server` air-quality tool
 
 ---
 
@@ -88,7 +90,7 @@ All resource data is also reachable via tools — both resources mirror tool out
 
 ### `openaq_list_parameters` <sub>tool</sub>
 
-- Optional `query` filters the ~44-parameter catalog by code, display name, or description (case-insensitive); `pollutantsOnly` excludes meteorological/particle-count channels (temperature, humidity, wind, pressure)
+- Optional `query` filters the parameter catalog by code, display name, or description (case-insensitive); `pollutantsOnly` excludes meteorological/particle-count channels (temperature, humidity, wind, pressure)
 - The unit-disambiguation reference — the same pollutant appears under multiple ids for different units (e.g. CO is id 4 in µg/m³, id 8 in ppm, id 102 in ppb)
 - Returns each parameter's id, code, display name, canonical unit, and a one-line description
 
@@ -97,7 +99,8 @@ All resource data is also reachable via tools — both resources mirror tool out
 ### `openaq_list_countries` <sub>tool</sub>
 
 - Optional `query` matches a two-letter input as an exact ISO 3166-1 alpha-2 code, longer input as a substring of code or name; `parametersId` filters to countries measuring that parameter anywhere
-- Returns each country's id, ISO code, name, `datetimeFirst`/`datetimeLast` data span, and the parameters measured anywhere within it
+- `limit` (1–100, default 20) and `page` (1-based) page the filtered list in OpenAQ catalog order. `totalCount` is the full filtered count; when more countries follow, `truncated`/`shown`/`cap` and a notice name the next page. A page past the end returns no countries and a notice naming the last page
+- Returns each country's id, OpenAQ country code (ISO 3166-1 alpha-2, or `-99` where OpenAQ has none), name, `datetimeFirst`/`datetimeLast` data span, and the parameters measured anywhere within it
 - The availability check before a regional `openaq_find_locations` sweep — answers "which countries have NO2 monitoring?"
 
 ---
@@ -122,7 +125,7 @@ All resource data is also reachable via tools — both resources mirror tool out
 ### `openaq://location/{locationId}` <sub>resource</sub>
 
 - Returns name, locality, timezone, country, provider, `isMonitor`/`isMobile`, coordinates, sensors (each with parameter id/name/unit), and the `datetimeFirst`/`datetimeLast` span
-- `locationId` comes from `openaq_find_locations`
+- `locationId` comes from `openaq_find_locations`; a segment that is not a positive integer fails as `invalid_location_id` before any request
 - Cached 5 minutes — station metadata is near-static, but `datetimeLast` advances as measurements land
 
 ---
@@ -155,7 +158,7 @@ OpenAQ-specific:
 - Single typed client over the OpenAQ v3 REST API with `X-API-Key` auth, retry with rate-limit-calibrated backoff, and OpenAQ-specific error classification (clean-JSON 404 → `NotFound`; the Python-repr 422 body → `ValidationError`; the plain-text 500 on bad coordinates → transient `ServiceUnavailable`)
 - Hides the v3 `location → sensor → measurement` hierarchy — `openaq_get_measurements` resolves a station + parameter to the underlying sensor; `openaq_get_readings` joins the latest feed against the sensor map so every value is labeled
 - DataCanvas spillover for large measurement series, queryable with read-only DuckDB SQL
-- Coordinates and radius are bounded in Zod at the edge — OpenAQ returns an opaque plain-text 500 for out-of-range input, so the server rejects it cleanly before the call
+- Coordinates, radius, and bbox corners (range, and west-to-east / south-to-north order) are bounded in Zod at the edge, and contradictory search scopes are rejected before the call — OpenAQ returns an opaque plain-text 500 for any of them
 
 Agent-friendly output:
 
