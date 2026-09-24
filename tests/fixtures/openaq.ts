@@ -282,3 +282,26 @@ export const countriesWithNullParameters: OpenAqCountry[] = [
     parameters: null,
   },
 ];
+
+/**
+ * A country catalog of `count` rows in OpenAQ's ascending-id order, for paging
+ * tests that need more rows than one page. Codes run AA, AB, … so every row is
+ * distinguishable. Every country measures pm25 (id 2); every third (ids 1, 4, 7, …)
+ * also measures no2 (id 5); `nullParametersAt` (1-based id) marks one row with
+ * `parameters: null`, the sparse shape OpenAQ returns for a country with none.
+ */
+export function makeCountries(count: number, nullParametersAt?: number): OpenAqCountry[] {
+  return Array.from({ length: count }, (_, i) => {
+    const id = i + 1;
+    const pm25 = { id: 2, name: 'pm25', units: 'µg/m³', displayName: 'PM2.5' };
+    const no2 = { id: 5, name: 'no2', units: 'µg/m³', displayName: 'NO₂ mass' };
+    return {
+      id,
+      code: String.fromCharCode(65 + Math.floor(i / 26), 65 + (i % 26)),
+      name: `Country ${id}`,
+      datetimeFirst: '2016-01-01T00:00:00Z',
+      datetimeLast: '2026-09-01T00:00:00Z',
+      parameters: id === nullParametersAt ? null : i % 3 === 0 ? [pm25, no2] : [pm25],
+    };
+  });
+}

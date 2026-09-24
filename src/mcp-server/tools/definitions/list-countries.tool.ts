@@ -1,8 +1,9 @@
 /**
  * @fileoverview openaq_list_countries — catalog of country-level coverage: id,
- * ISO code, name, the date span of available station data, and which parameters
- * are measured anywhere in that country. The availability check before a regional
- * openaq_find_locations sweep — answers "which countries have NO2 monitoring?".
+ * OpenAQ country code, name, the date span of available station data, and which
+ * parameters are measured anywhere in that country. The availability check before
+ * a regional openaq_find_locations sweep — answers "which countries have NO2
+ * monitoring?". The catalog is fetched whole and filtered locally, then paged.
  * @module mcp-server/tools/definitions/list-countries.tool
  */
 
@@ -11,24 +12,45 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { withUpstream } from '@/mcp-server/tools/shared/upstream-errors.js';
 import { getOpenAqService } from '@/services/openaq/openaq-service.js';
 
+/** Largest page a caller can request, matching openaq_find_locations. */
+const LIMIT_MAX = 100;
+
 export const listCountries = tool('openaq_list_countries', {
   title: 'openaq-mcp-server: list countries',
   description:
-    'Catalog of country-level coverage: id, ISO code, name, the date span of available station data (datetimeFirst/datetimeLast), and which parameters are measured anywhere in that country. The availability check before a regional sweep — answers "which countries have NO2 monitoring?" and tells you whether a country has recent data before you call openaq_find_locations. Coverage is uneven worldwide; this surfaces where measured data exists.',
+    'Catalog of country-level coverage: id, OpenAQ country code, name, the date span of available station data (datetimeFirst/datetimeLast), and which parameters are measured anywhere in that country. The availability check before a regional sweep — answers "which countries have NO2 monitoring?" and tells you whether a country has recent data before you call openaq_find_locations. Coverage is uneven worldwide; this surfaces where measured data exists. Results come a page at a time (20 countries by default); totalCount is the full filtered count.',
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     query: z
       .string()
       .optional()
       .describe(
-        'Case-insensitive filter over the bounded country catalog (~153) by code and name. A two-letter query is treated as an exact ISO 3166-1 alpha-2 code (e.g. "US" → United States); longer queries match as substrings (e.g. "united", "germany"). Omit to list all.',
+        'Case-insensitive filter over the country catalog by code and name. A two-letter query is treated as an exact ISO 3166-1 alpha-2 code (e.g. "US" → United States); longer queries match as substrings (e.g. "united", "germany"). Omit to page through the whole catalog.',
       ),
     parametersId: z
       .number()
       .int()
+      .positive()
       .optional()
       .describe(
         'Only return countries that measure this parameter id somewhere (e.g. 2 = PM2.5 µg/m³) — the one-call answer to "which countries have NO2 monitoring?". Get ids from openaq_list_parameters; the same pollutant has several ids for different units. Composes with query.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(LIMIT_MAX)
+      .default(20)
+      .describe(
+        'Max countries to return (1–100). Default 20. Applied after query and parametersId, in OpenAQ catalog order.',
+      ),
+    page: z
+      .number()
+      .int()
+      .min(1)
+      .default(1)
+      .describe(
+        'Which page of the filtered list to return (1-based). Default 1. With limit 20, page 2 returns countries 21–40. A page past the last one returns no countries and a notice naming the last page.',
       ),
   }),
   output: z.object({
@@ -39,7 +61,9 @@ export const listCountries = tool('openaq_list_countries', {
             id: z.number().describe('Country id (OpenAQ internal)'),
             code: z
               .string()
-              .describe('ISO 3166-1 alpha-2 code — pass as iso to openaq_find_locations'),
+              .describe(
+                'OpenAQ country code: ISO 3166-1 alpha-2, or "-99" where OpenAQ has none — pass as iso to openaq_find_locations',
+              ),
             name: z.string().describe('Country name'),
             datetimeFirst: z
               .string()
@@ -72,8 +96,21 @@ export const listCountries = tool('openaq_list_countries', {
       .describe('Matching countries with coverage metadata.'),
   }),
   enrichment: {
-    totalCount: z.number().describe('Total countries matched after filtering.'),
-    notice: z.string().optional().describe('Guidance when the query matched nothing.'),
+    totalCount: z
+      .number()
+      .describe('Countries matched after query and parametersId, across every page.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when more matching countries follow on later pages.'),
+    shown: z.number().optional().describe('Number of countries returned on this page.'),
+    cap: z.number().optional().describe('The limit that was applied.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Guidance when the filters matched nothing, when more pages follow (the next page to request), or when the page is past the last one.',
+      ),
   },
   errors: [
     {
@@ -136,8 +173,17 @@ export const listCountries = tool('openaq_list_countries', {
       filtered = filtered.filter((c) => c.parameters?.some((p) => p.id === parametersId) ?? false);
     }
 
-    ctx.enrich.total(filtered.length);
-    if (filtered.length === 0) {
+    const total = filtered.length;
+    ctx.enrich.total(total);
+
+    // Page the filtered list in upstream (ascending country id) order. The total is
+    // exact, so truncation means rows remain past this page — an exactly full last
+    // page is not truncated.
+    const start = (input.page - 1) * input.limit;
+    const pageRows = filtered.slice(start, start + input.limit);
+    const lastPage = Math.ceil(total / input.limit);
+
+    if (total === 0) {
       const criteria = [
         ...(input.query ? [`query "${input.query}"`] : []),
         ...(parametersId !== undefined ? [`parametersId ${parametersId}`] : []),
@@ -151,12 +197,32 @@ export const listCountries = tool('openaq_list_countries', {
           ? 'No countries returned from OpenAQ.'
           : `No countries matched ${criteria.join(' and ')}. ${recovery}`,
       );
+    } else if (pageRows.length === 0) {
+      ctx.enrich.notice(
+        `Page ${input.page} is past the end: ${total} ${total === 1 ? 'country matches' : 'countries match'}, so at limit ${input.limit} the last page is ${lastPage}. Request page ${lastPage}${lastPage > 1 ? ' or earlier' : ''}.`,
+      );
+    } else if (start + pageRows.length < total) {
+      const nextPage = input.page + 1;
+      // On page 1 below the cap, a higher limit reaches the rest in fewer calls; past
+      // page 1 it would re-slice the pages, so name only the next page there.
+      const raise =
+        input.page === 1 && input.limit < LIMIT_MAX ? ` or raise limit (max ${LIMIT_MAX})` : '';
+      ctx.enrich.truncated({
+        shown: pageRows.length,
+        cap: input.limit,
+        guidance: `Page ${input.page} of ${lastPage} shows countries ${start + 1}–${start + pageRows.length} of ${total}. Request page ${nextPage}${raise} for more, or narrow with query or parametersId.`,
+      });
     }
 
-    ctx.log.info('Listed countries', { total: all.length, shown: filtered.length });
+    ctx.log.info('Listed countries', {
+      total: all.length,
+      matched: total,
+      page: input.page,
+      shown: pageRows.length,
+    });
 
     return {
-      countries: filtered.map((c) => ({
+      countries: pageRows.map((c) => ({
         id: c.id,
         code: c.code,
         name: c.name,
@@ -168,11 +234,12 @@ export const listCountries = tool('openaq_list_countries', {
   },
 
   format: (result) => {
-    // Empty result: render nothing. The framework unconditionally appends the
-    // enrichment trailer (`**0 total**` plus the blockquoted notice naming the
-    // filter that missed), so it stands alone as the single content block — one
-    // paragraph. A terse line here would only split the miss from its recovery
-    // guidance across two blocks; it can never replace the trailer.
+    // Empty page: render nothing. The framework unconditionally appends the
+    // enrichment trailer (the total plus the blockquoted notice naming the filter
+    // that missed, or the last page when this one is past the end), so it stands
+    // alone as the single content block — one paragraph. A terse line here would
+    // only split the miss from its guidance across two blocks; it can never
+    // replace the trailer.
     if (result.countries.length === 0) return [];
     const lines = result.countries.map((c) => {
       const span = `${c.datetimeFirst ?? 'unknown'} → ${c.datetimeLast ?? 'unknown'}`;
