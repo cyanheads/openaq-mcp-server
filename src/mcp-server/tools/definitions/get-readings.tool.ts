@@ -42,6 +42,7 @@ export const getReadings = tool('openaq_get_readings', {
     locationId: z
       .number()
       .int()
+      .positive()
       .optional()
       .describe(
         'Station id from openaq_find_locations. Provide this OR coordinates. When set, returns the latest value for every sensor at this station.',
@@ -52,6 +53,7 @@ export const getReadings = tool('openaq_get_readings', {
     parametersId: z
       .number()
       .int()
+      .positive()
       .optional()
       .describe(
         'Required with coordinates: which parameter id the nearest station must measure (get ids from openaq_list_parameters). With locationId, optionally filters the returned values to this parameter id; omit to get all sensors.',

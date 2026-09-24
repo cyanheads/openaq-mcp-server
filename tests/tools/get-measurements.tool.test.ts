@@ -6,6 +6,7 @@
  * @module tests/tools/get-measurements.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import type { DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import {
   JsonRpcErrorCode,
@@ -16,7 +17,7 @@ import {
   timeout,
 } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getMeasurements } from '@/mcp-server/tools/definitions/get-measurements.tool.js';
 import { setCanvas } from '@/services/canvas-accessor.js';
 import type { MeasurementsPage } from '@/services/openaq/openaq-service.js';
@@ -1178,5 +1179,60 @@ describe('openaq_get_measurements error contract (#16)', () => {
     // canvas.acquire() throws it from inside the framework, so the contract is the
     // only place it can be advertised to a client.
     expect(getMeasurements.errors?.map((e) => e.reason)).toContain('canvas_not_found');
+  });
+});
+
+describe('openaq_get_measurements id inputs must be positive (#33)', () => {
+  /** Rejects any fetch, so a path that reaches the network without a stub fails loudly. */
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch in a unit test'));
+  });
+
+  const emitted = () =>
+    z.toJSONSchema(getMeasurements.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+
+  it.each(['locationId', 'parametersId'])('advertises %s as an integer', (field) => {
+    expect(emitted().properties[field]).toMatchObject({
+      type: 'integer',
+      description: expect.any(String),
+    });
+  });
+
+  it.each(['locationId', 'parametersId'])('advertises %s with exclusiveMinimum 0', (field) => {
+    expect(emitted().properties[field]).toMatchObject({ exclusiveMinimum: 0 });
+    expect(emitted().properties[field]).not.toHaveProperty('minimum');
+  });
+
+  it.each([
+    ['locationId', { locationId: 0, parametersId: 2 }],
+    ['locationId', { locationId: -1, parametersId: 2 }],
+    ['parametersId', { locationId: 931, parametersId: 0 }],
+    ['parametersId', { locationId: 931, parametersId: -1 }],
+  ])('rejects a non-positive %s as invalid_arguments before any request', async (field, input) => {
+    const getLocation = vi.fn(async () => seattleLocation);
+    const getMeasurementsSpy = vi.fn(async () => onePage([dailyMeasurement]));
+    installStubService({ getLocation, getMeasurements: getMeasurementsSpy });
+    const result = await runToolContract(getMeasurements, input);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_arguments', issues: [{ path: [field] }] },
+      },
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(field);
+    expect(getLocation).not.toHaveBeenCalled();
+    expect(getMeasurementsSpy).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the lowest real ids', () => {
+    expect(getMeasurements.input.parse({ locationId: 1, parametersId: 1 })).toMatchObject({
+      locationId: 1,
+      parametersId: 1,
+    });
   });
 });

@@ -26,7 +26,7 @@ export const locationResource = resource('openaq://location/{locationId}', {
   errors: [
     {
       reason: 'invalid_location_id',
-      code: JsonRpcErrorCode.NotFound,
+      code: JsonRpcErrorCode.ValidationError,
       when: 'The {locationId} path segment is not a positive integer.',
       recovery:
         'Rebuild the URI with the numeric id field from an openaq_find_locations result, e.g. openaq://location/931.',

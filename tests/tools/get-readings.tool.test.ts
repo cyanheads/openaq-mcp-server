@@ -9,6 +9,7 @@
  * @module tests/tools/get-readings.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import {
   JsonRpcErrorCode,
   type McpError,
@@ -18,8 +19,8 @@ import {
   timeout,
   unauthorized,
 } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it } from 'vitest';
+import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { getReadings } from '@/mcp-server/tools/definitions/get-readings.tool.js';
 import { setOpenAqService } from '@/services/openaq/openaq-service.js';
 import { seattleLatest, seattleLocation } from '../fixtures/openaq.js';
@@ -373,5 +374,67 @@ describe('openaq_get_readings', () => {
     expect(text).toContain('2.0875');
     expect(text).not.toContain('0.019899999999999998');
     expect(text).not.toContain('2.0874999999999995');
+  });
+});
+
+describe('openaq_get_readings id inputs must be positive (#33)', () => {
+  /** Rejects any fetch, so a path that reaches the network without a stub fails loudly. */
+  beforeEach(() => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch in a unit test'));
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const emitted = () =>
+    z.toJSONSchema(getReadings.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+
+  it.each(['locationId', 'parametersId'])('advertises %s as an integer', (field) => {
+    expect(emitted().properties[field]).toMatchObject({
+      type: 'integer',
+      description: expect.any(String),
+    });
+  });
+
+  it.each(['locationId', 'parametersId'])('advertises %s with exclusiveMinimum 0', (field) => {
+    expect(emitted().properties[field]).toMatchObject({ exclusiveMinimum: 0 });
+    expect(emitted().properties[field]).not.toHaveProperty('minimum');
+  });
+
+  it.each([
+    ['locationId', { locationId: 0 }],
+    ['locationId', { locationId: -1 }],
+    ['parametersId', { locationId: 931, parametersId: 0 }],
+    ['parametersId', { locationId: 931, parametersId: -3 }],
+    ['parametersId', { coordinates: '47.6062,-122.3321', parametersId: 0 }],
+    ['parametersId', { coordinates: '47.6062,-122.3321', parametersId: -1 }],
+  ])('rejects a non-positive %s as invalid_arguments before any request', async (field, input) => {
+    const findLocations = vi.fn(async () => ({ meta: { found: 1 }, results: [seattleLocation] }));
+    const getLocation = vi.fn(async () => seattleLocation);
+    const getLatest = vi.fn(async () => seattleLatest);
+    installStubService({ findLocations, getLocation, getLatest });
+    const result = await runToolContract(getReadings, input);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_arguments', issues: [{ path: [field] }] },
+      },
+    });
+    const text = result.content.map((b) => (b.type === 'text' ? b.text : '')).join('\n');
+    expect(text).toContain(field);
+    // Never a false no-coverage or wrong-parameter answer for an id that cannot exist.
+    expect(text).not.toMatch(/no_station_near_coordinates|parameter_not_at_location/);
+    expect(findLocations).not.toHaveBeenCalled();
+    expect(getLocation).not.toHaveBeenCalled();
+    expect(getLatest).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  it('still accepts the lowest real ids', () => {
+    expect(getReadings.input.parse({ locationId: 1, parametersId: 1 })).toMatchObject({
+      locationId: 1,
+      parametersId: 1,
+    });
   });
 });

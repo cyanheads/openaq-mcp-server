@@ -1,6 +1,7 @@
 /**
  * @fileoverview Resource tests — openaq://location/{locationId} (metadata + sensor
- * map, NotFound on bad id) and openaq://parameters (full catalog mirror), plus the
+ * map, ValidationError on a malformed id, NotFound on an unknown one) and
+ * openaq://parameters (full catalog mirror), plus the
  * error contracts both declare: every failure carries a reason and a recovery hint,
  * not just a code.
  * @module tests/resources/resources.test
@@ -15,14 +16,22 @@ import {
   unauthorized,
 } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { locationResource } from '@/mcp-server/resources/definitions/location.resource.js';
 import { parametersResource } from '@/mcp-server/resources/definitions/parameters.resource.js';
 import { setOpenAqService } from '@/services/openaq/openaq-service.js';
 import { parameters, seattleLocation } from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
 
-afterEach(() => setOpenAqService(undefined as never));
+/** Rejects any fetch, so a path that reaches the network without a stub fails loudly. */
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch in a unit test'));
+});
+
+afterEach(() => {
+  setOpenAqService(undefined as never);
+  vi.restoreAllMocks();
+});
 
 /** The recovery text a resource declared for `reason` — what the client must receive. */
 const recoveryFor = (
@@ -64,7 +73,9 @@ describe('openaq://location/{locationId}', () => {
     await expect(
       locationResource.handler({ locationId: 'abc' }, locationCtx('abc')),
     ).rejects.toMatchObject({
-      code: JsonRpcErrorCode.NotFound,
+      // A malformed segment is a validation failure; NotFound is kept for an id that
+      // parses but names no station, so a client can tell the two apart by code (#33).
+      code: JsonRpcErrorCode.ValidationError,
       data: {
         reason: 'invalid_location_id',
         locationId: 'abc',
@@ -83,6 +94,32 @@ describe('openaq://location/{locationId}', () => {
       locationResource.handler({ locationId: id }, locationCtx(id)),
     ).rejects.toMatchObject({ data: { reason: 'invalid_location_id' } });
   });
+
+  it.each([
+    ['zero', '0'],
+    ['negative', '-5'],
+    ['fractional', '9.5'],
+  ])(
+    'fails a %s id at ValidationError with the unchanged recovery hint, before any request (#33)',
+    async (_label, id) => {
+      const getLocation = vi.fn(async () => seattleLocation);
+      installStubService({ getLocation });
+      await expect(
+        locationResource.handler({ locationId: id }, locationCtx(id)),
+      ).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ValidationError,
+        data: {
+          reason: 'invalid_location_id',
+          locationId: id,
+          recovery: {
+            hint: 'Rebuild the URI with the numeric id field from an openaq_find_locations result, e.g. openaq://location/931.',
+          },
+        },
+      });
+      expect(getLocation).not.toHaveBeenCalled();
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    },
+  );
 
   it('maps an upstream 404 to location_not_found with a recovery hint', async () => {
     installStubService({

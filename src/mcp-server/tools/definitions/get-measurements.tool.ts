@@ -104,10 +104,11 @@ export const getMeasurements = tool('openaq_get_measurements', {
     'Historical measurement series for one pollutant at one station over a date range — for trend analysis and "was last week worse than the monthly average?". Pass a locationId and a parametersId and work in stations — you get the series for that pollutant at that station. Choose aggregation: raw (every reported value), hourly, or daily — daily and hourly add a per-bucket statistical summary (min, median, max, mean, sd). Large ranges produce thousands of rows and stage on a DataCanvas: the response returns a preview plus a canvasId and table name — call openaq_dataframe_describe on the canvasId for the table\'s columns, then openaq_dataframe_query to run SQL over it. Passing a canvas_id stages the series there whatever its size, so two stations land on one canvas for a side-by-side comparison. Values carry their unit; the server never converts between µg/m³, ppm, and ppb.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
-    locationId: z.number().int().describe('Station id from openaq_find_locations.'),
+    locationId: z.number().int().positive().describe('Station id from openaq_find_locations.'),
     parametersId: z
       .number()
       .int()
+      .positive()
       .describe(
         "Parameter id to pull the series for (e.g. 2 = PM2.5 µg/m³). Get ids from openaq_list_parameters. Must be a parameter the station measures — find_locations lists each station's parameters.",
       ),
