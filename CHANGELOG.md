@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-09-23 · ⚠️ Breaking
+
+openaq_find_locations rejects contradictory search scopes, derives paging from its rows, and gains station-class and provider filters; openaq_list_countries pages its catalog 20 rows at a time; non-positive ids fail at the schema.
+
 ## [0.1.10](changelog/0.1.x/0.1.10.md) — 2026-09-22
 
 openaq_get_measurements now reports honest pull totals and stages series on request; openaq_dataframe_query caps responses at 200 rows; both tools render every row they carry and point callers at describe-then-query.

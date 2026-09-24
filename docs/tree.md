@@ -1,6 +1,6 @@
 # openaq-mcp-server - Directory Structure
 
-Generated on: 2026-09-20 14:01:56
+Generated on: 2026-09-24 05:42:50
 
 ```text
 openaq-mcp-server/
@@ -25,6 +25,7 @@ openaq-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   └── design.md
