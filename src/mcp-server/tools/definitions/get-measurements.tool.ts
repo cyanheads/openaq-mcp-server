@@ -45,6 +45,23 @@ const isDateOnly = (bound: string | undefined): boolean =>
 /** An instant as `YYYY-MM-DDTHH:MM:SSZ` — the fixed-width form OpenAQ accepts. */
 const toUtcSeconds = (ms: number): string => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 
+/**
+ * A range bound: `dateRegex` checks the shape, and the refine checks that it
+ * names a real calendar date and time. `Date.parse` rolls "2026-02-30" over to March 2 and
+ * returns NaN for month 13, so the parsed instant must print back as the input —
+ * otherwise the local-day expansion would send a garbage instant or throw.
+ */
+const rangeBound = z
+  .string()
+  .regex(dateRegex, { abort: true })
+  .refine(
+    (bound) => {
+      const ms = Date.parse(isDateOnly(bound) ? `${bound}T00:00:00Z` : bound);
+      return !Number.isNaN(ms) && toUtcSeconds(ms).startsWith(bound);
+    },
+    { message: 'Not a real calendar date or time — check the month, day, and hour.' },
+  );
+
 const dayFormatters = new Map<string, Intl.DateTimeFormat>();
 
 /**
@@ -228,16 +245,12 @@ export const getMeasurements = tool('openaq_get_measurements', {
       .describe(
         "Parameter id to pull the series for (e.g. 2 = PM2.5 µg/m³). Get ids from openaq_list_parameters. Must be a parameter the station measures — find_locations lists each station's parameters.",
       ),
-    datetimeFrom: z
-      .string()
-      .regex(dateRegex)
+    datetimeFrom: rangeBound
       .optional()
       .describe(
         'Start of the range, inclusive. A date "YYYY-MM-DD" opens at local midnight of that day in the station\'s timezone (UTC midnight when OpenAQ lists none); a full UTC "YYYY-MM-DDTHH:MM:SSZ" is sent as is. Omit to start from the sensor\'s earliest data — the series runs oldest first, so on a long-running station an open start fills the row cap with its oldest values; set datetimeFrom to reach recent ones. effectiveRange echoes the instant sent.',
       ),
-    datetimeTo: z
-      .string()
-      .regex(dateRegex)
+    datetimeTo: rangeBound
       .optional()
       .describe(
         'End of the range, inclusive. A date "YYYY-MM-DD" covers that whole station-local day, closing at the next local midnight, so a DST day spans 23 or 25 hours; a full UTC "YYYY-MM-DDTHH:MM:SSZ" is sent as is. Must land after datetimeFrom — the two forms mix freely, so "2026-06-25" to "2026-06-25" is a valid one-day range. Omit for "up to now". effectiveRange echoes the instant sent.',

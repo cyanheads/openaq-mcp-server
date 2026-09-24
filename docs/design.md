@@ -535,6 +535,7 @@ carry their unit; the server never converts between µg/m³, ppm, and ppb.
     .describe('Station id from openaq_find_locations.'),
   parametersId: z.number().int().positive()
     .describe('Parameter id to pull the series for (e.g. 2 = PM2.5 µg/m³). Get ids from openaq_list_parameters. Must be a parameter the station measures — find_locations lists each station\'s parameters.'),
+  // Both bounds also refine to a real calendar date/time — Date.parse rolls "2026-02-30" over to March 2.
   datetimeFrom: z.string().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$/).optional()
     .describe('Start of the range, inclusive. A date "YYYY-MM-DD" opens at local midnight of that day in the station\'s timezone (UTC midnight when OpenAQ lists none); a full UTC timestamp is sent as is. Omit to start from the sensor\'s earliest data — the series runs oldest first, so set datetimeFrom to reach recent values.'),
   datetimeTo: z.string().regex(/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2}Z)?$/).optional()

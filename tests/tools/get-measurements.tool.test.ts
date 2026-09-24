@@ -2290,3 +2290,60 @@ describe('openaq_get_measurements date-only disclosure', () => {
     );
   });
 });
+
+describe('openaq_get_measurements rejects bounds that are not real calendar instants', () => {
+  it.each([
+    ['datetimeFrom', '2026-13-01'],
+    ['datetimeFrom', '2026-02-30'],
+    ['datetimeTo', '2026-04-31'],
+    ['datetimeTo', '2026-06-25T24:00:00Z'],
+    ['datetimeFrom', '2026-00-10T00:00:00Z'],
+  ])('rejects %s %s as invalid_arguments before any request', async (field, value) => {
+    const getLocation = vi.fn(async () => seattleLocation);
+    const getMeasurementsSpy = vi.fn(async () => onePage([dailyMeasurement]));
+    installStubService({ getLocation, getMeasurements: getMeasurementsSpy });
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      [field]: value,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: {
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_arguments', issues: [{ path: [field] }] },
+      },
+    });
+    expect(getLocation).not.toHaveBeenCalled();
+    expect(getMeasurementsSpy).not.toHaveBeenCalled();
+  });
+
+  it('still accepts a leap day and a full timestamp', async () => {
+    const { calls } = serveRows([dailyMeasurement]);
+    const result = await runToolContract(getMeasurements, {
+      locationId: 931,
+      parametersId: 2,
+      aggregation: 'daily',
+      datetimeFrom: '2028-02-29',
+      datetimeTo: '2028-03-01T12:00:00Z',
+    });
+    expect(result.isError).toBeFalsy();
+    expect(calls[0]).toMatchObject({
+      datetimeFrom: '2028-02-29T08:00:00Z',
+      datetimeTo: '2028-03-01T12:00:00Z',
+    });
+  });
+
+  it('keeps the advertised pattern unchanged', () => {
+    const emitted = z.toJSONSchema(getMeasurements.input, { io: 'input' }) as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    for (const field of ['datetimeFrom', 'datetimeTo']) {
+      expect(emitted.properties[field]).toMatchObject({
+        type: 'string',
+        pattern: '^\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}:\\d{2}Z)?$',
+      });
+    }
+  });
+});
