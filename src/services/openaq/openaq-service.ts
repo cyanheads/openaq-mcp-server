@@ -52,8 +52,13 @@ export interface FindLocationsParams {
   coordinates?: string;
   iso?: string;
   limit: number;
+  /** `true` = mobile stations only, `false` = fixed only; omitted = both. */
+  mobile?: boolean;
+  /** `true` = reference monitors only, `false` = low-cost sensors only; omitted = both. */
+  monitor?: boolean;
   page?: number;
   parametersId?: number;
+  providersId?: number;
   radius?: number;
 }
 
@@ -83,7 +88,9 @@ const FETCH_TIMEOUT_MS = 15_000;
 /**
  * Interpret `meta.found` (which may be a string like `">5"`) into a numeric floor
  * plus whether it is a lower bound. `">N"` means strictly more than N exist, so the
- * embedded number is a floor, not an exact total. A bare number is exact.
+ * embedded number is a floor, not an exact total. A bare number is exact. Only
+ * valid where `meta.found` is a total (the measurements endpoints) — on
+ * `/v3/locations` it is a per-page count; see `OpenAqMeta.found`.
  */
 function interpretFound(found: number | string | undefined): {
   isLowerBound: boolean;
@@ -256,7 +263,11 @@ export class OpenAqService {
     });
   }
 
-  /** `GET /v3/locations` — coordinates+radius / bbox / iso / parametersId. */
+  /**
+   * `GET /v3/locations` — coordinates+radius / bbox / iso, narrowed by
+   * parametersId, monitor, mobile, and providersId. `meta.found` on this endpoint
+   * counts only the page returned, so callers derive paging state from the rows.
+   */
   async findLocations(
     params: FindLocationsParams,
     ctx: Context,
@@ -264,11 +275,16 @@ export class OpenAqService {
     const qs = new URLSearchParams();
     if (params.coordinates) {
       qs.set('coordinates', params.coordinates);
+      // OpenAQ answers coordinates without a radius with HTTP 500, so the default lives here.
       qs.set('radius', String(params.radius ?? 12_000));
     }
     if (params.bbox) qs.set('bbox', params.bbox);
     if (params.iso) qs.set('iso', params.iso);
     if (params.parametersId !== undefined) qs.set('parameters_id', String(params.parametersId));
+    // `false` is a real filter (low-cost sensors only / fixed only), so test presence, not truthiness.
+    if (params.monitor !== undefined) qs.set('monitor', String(params.monitor));
+    if (params.mobile !== undefined) qs.set('mobile', String(params.mobile));
+    if (params.providersId !== undefined) qs.set('providers_id', String(params.providersId));
     qs.set('limit', String(params.limit));
     if (params.page !== undefined) qs.set('page', String(params.page));
     const res = await this.get<OpenAqListResponse<OpenAqLocation>>(
@@ -335,7 +351,7 @@ export class OpenAqService {
     return { results: res.results, found: total, foundIsLowerBound: isLowerBound };
   }
 
-  /** `GET /v3/parameters` — the full pollutant + unit catalog (~44 entries). */
+  /** `GET /v3/parameters` — the full pollutant + unit catalog. */
   async listParameters(ctx: Context): Promise<OpenAqParameter[]> {
     const res = await this.get<OpenAqListResponse<OpenAqParameter>>(
       '/parameters?limit=1000',
@@ -345,7 +361,11 @@ export class OpenAqService {
     return res.results;
   }
 
-  /** `GET /v3/countries` — country coverage catalog (~153 entries). */
+  /**
+   * `GET /v3/countries` — the whole country coverage catalog in one request (a few
+   * hundred rows at most, well inside `limit=1000`, in ascending country id order).
+   * `openaq_list_countries` filters and pages it locally.
+   */
   async listCountries(ctx: Context): Promise<OpenAqCountry[]> {
     const res = await this.get<OpenAqListResponse<OpenAqCountry>>(
       '/countries?limit=1000',

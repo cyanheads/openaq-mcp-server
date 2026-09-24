@@ -113,6 +113,32 @@ describe('bboxSchema', () => {
     expect(result.error?.issues[0]?.message).toMatch(/out of range/i);
   });
 
+  it.each([
+    ['both axes inverted', '-122.1,47.8,-122.5,47.4'],
+    ['longitudes inverted', '-122.1,47.4,-122.5,47.8'],
+    ['latitudes inverted', '-122.5,47.8,-122.1,47.4'],
+  ])('rejects a box with %s, naming the corner order (#26)', (_label, value) => {
+    // OpenAQ answers every inverted form with a plain-text HTTP 500, retried.
+    const result = bbox.safeParse(value);
+    expect(result.success).toBe(false);
+    expect(result.error?.issues).toHaveLength(1);
+    const message = rejectionMessage(() => bbox.parse(value));
+    expect(message).toContain('minLon');
+    expect(message).toMatch(/minLon.*maxLon/);
+    expect(message).toMatch(/minLat.*maxLat/);
+  });
+
+  it('accepts a zero-area box, which OpenAQ serves (#26)', () => {
+    expect(bbox.parse('-122.3,47.6,-122.3,47.6')).toBe('-122.3,47.6,-122.3,47.6');
+  });
+
+  it('reports only the range issue for an out-of-range box that is also inverted (#26)', () => {
+    const result = bbox.safeParse('200,100,-200,-100');
+    expect(result.error?.issues.map((i) => i.message)).toEqual([
+      expect.stringMatching(/out of range/i),
+    ]);
+  });
+
   it('names the expected format when the box is still malformed after stripping (#17)', () => {
     const result = bbox.safeParse('a, b, c, d');
     expect(result.success).toBe(false);

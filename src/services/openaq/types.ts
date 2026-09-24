@@ -3,8 +3,8 @@
  * (probed 2026-06-13). These intentionally track upstream sparsity: timestamps
  * are `{utc, local}` objects (not strings), `distance` is nullable, summary `sd`
  * is nullable, `displayName` is nullable, and `meta.found` is `number | string`
- * (e.g. `">2"` when more pages exist). Tool handlers reshape/join these into the
- * narrower domain output schemas.
+ * (e.g. `">2"`) whose meaning differs by endpoint — see `OpenAqMeta`. Tool
+ * handlers reshape/join these into the narrower domain output schemas.
  * @module services/openaq/types
  */
 
@@ -14,14 +14,21 @@ export interface OpenAqDatetime {
   utc: string;
 }
 
-/** List-endpoint envelope. `found` may be a string like `">2"` when more pages exist. */
+/** List-endpoint envelope. */
 export interface OpenAqMeta {
+  /**
+   * Not a total on every endpoint (measured 2026-09-23). On `/v3/locations` it
+   * counts only the page returned: `">limit"` whenever the page is full — even
+   * when no later page holds anything — and the page's own row count otherwise
+   * (`0` past the end). On the sensor measurements endpoints it is a total across
+   * pages, with `">N"` as a lower bound.
+   */
   found?: number | string;
   limit?: number;
   page?: number;
 }
 
-/** Generic `{ meta, results }` envelope wrapping every list endpoint. */
+/** Generic `{ meta, results }` envelope wrapping every list endpoint; see `OpenAqMeta.found`. */
 export interface OpenAqListResponse<T> {
   meta?: OpenAqMeta;
   results: T[];

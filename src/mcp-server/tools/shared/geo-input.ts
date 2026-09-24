@@ -1,10 +1,11 @@
 /**
  * @fileoverview Shared Zod schema builders for geographic tool inputs
  * (`coordinates` point, `bbox` bounding box). They bound latitude/longitude to
- * valid Earth ranges at the edge so out-of-range values are rejected as a clean
- * ValidationError instead of reaching OpenAQ — which returns a plain-text HTTP
- * 500 for bad coordinates (e.g. `999,999` or a `200,…` bbox), retried before it
- * surfaces. The shared module keeps the range rule single-sourced across
+ * valid Earth ranges, and a bbox's corners to west-to-east / south-to-north
+ * order, at the edge so bad values are rejected as a clean ValidationError
+ * instead of reaching OpenAQ — which returns a plain-text HTTP 500 for bad
+ * coordinates (e.g. `999,999`, a `200,…` bbox, or an inverted bbox), retried
+ * before it surfaces. The shared module keeps the range rule single-sourced across
  * find-locations and get-readings.
  * @module mcp-server/tools/shared/geo-input
  */
@@ -71,8 +72,12 @@ export function coordinatesSchema(description: string) {
 
 /**
  * `"minLon,minLat,maxLon,maxLat"` with each component bounded to valid Earth
- * ranges (lons to ±180, lats to ±90). Out-of-range corners (e.g. `200,100,…`)
- * fail here instead of reaching the upstream API as a plain-text 500.
+ * ranges (lons to ±180, lats to ±90) and the corners in order (west ≤ east,
+ * south ≤ north). Out-of-range corners (e.g. `200,100,…`) and inverted ones
+ * (e.g. `-122.1,47.8,-122.5,47.4`) both fail here instead of reaching the
+ * upstream API as a plain-text 500. Equal corners stay valid — OpenAQ serves a
+ * zero-area box. The range refine aborts, so an out-of-range box reports that
+ * one problem rather than a second, derived ordering complaint.
  */
 export function bboxSchema(description: string) {
   return z
@@ -94,6 +99,22 @@ export function bboxSchema(description: string) {
           {
             message:
               'Bounding box out of range. Use "minLon,minLat,maxLon,maxLat" with longitudes between -180 and 180 and latitudes between -90 and 90.',
+            abort: true,
+          },
+        )
+        .refine(
+          (value) => {
+            const [minLon, minLat, maxLon, maxLat] = value.split(',').map(Number) as [
+              number,
+              number,
+              number,
+              number,
+            ];
+            return minLon <= maxLon && minLat <= maxLat;
+          },
+          {
+            message:
+              'Bounding box corners out of order. Use "minLon,minLat,maxLon,maxLat" with minLon ≤ maxLon (west to east) and minLat ≤ maxLat (south to north).',
           },
         ),
     )

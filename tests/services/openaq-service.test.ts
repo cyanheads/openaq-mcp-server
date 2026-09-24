@@ -36,6 +36,18 @@ function makeService(): OpenAqService {
   return new OpenAqService({} as never, {} as never);
 }
 
+/**
+ * Every test starts with a fetch that rejects; each test that reaches the network
+ * installs its own response. A path that escapes the mock fails loudly instead
+ * of calling the live, rate-limited OpenAQ API.
+ */
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch in a unit test'));
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
 describe('interpretFound', () => {
   it('treats a bare number as an exact total', () => {
     expect(interpretFound(150)).toEqual({ total: 150, isLowerBound: false });
@@ -366,5 +378,77 @@ describe('OpenAqService.findLocations distance sort (#2)', () => {
       createMockContext(),
     );
     expect(res.results.map((r) => r.id)).toEqual([1, 2]);
+  });
+});
+
+describe('OpenAqService.findLocations query string', () => {
+  beforeEach(() => {
+    vi.stubEnv('OPENAQ_API_KEY', 'test-key');
+    vi.stubEnv('OPENAQ_API_BASE_URL', 'https://api.openaq.org/v3');
+    resetServerConfig();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetServerConfig();
+  });
+
+  /** Run findLocations against an empty page and return the one URL it requested. */
+  async function requestedUrl(params: Parameters<OpenAqService['findLocations']>[0]) {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(okJson({ meta: { found: 0 }, results: [] }));
+    await makeService().findLocations(params, createMockContext());
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    return new URL(String(fetchSpy.mock.calls[0]?.[0]));
+  }
+
+  it('maps every filter onto its upstream name', async () => {
+    const url = await requestedUrl({
+      coordinates: '47.6062,-122.3321',
+      radius: 5000,
+      iso: 'US',
+      parametersId: 2,
+      limit: 10,
+      page: 3,
+    });
+    expect(url.pathname).toBe('/v3/locations');
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      coordinates: '47.6062,-122.3321',
+      radius: '5000',
+      iso: 'US',
+      parameters_id: '2',
+      limit: '10',
+      page: '3',
+    });
+  });
+
+  it('falls back to a 12000 m radius when coordinates arrive without one', async () => {
+    const url = await requestedUrl({ coordinates: '47.6062,-122.3321', limit: 20 });
+    expect(url.searchParams.get('radius')).toBe('12000');
+  });
+
+  it('forwards the station filters, false included (#31)', async () => {
+    const url = await requestedUrl({
+      iso: 'GB',
+      monitor: false,
+      mobile: false,
+      providersId: 70,
+      limit: 20,
+    });
+    expect(url.searchParams.get('monitor')).toBe('false');
+    expect(url.searchParams.get('mobile')).toBe('false');
+    expect(url.searchParams.get('providers_id')).toBe('70');
+
+    vi.restoreAllMocks();
+    const on = await requestedUrl({ iso: 'GB', monitor: true, mobile: true, limit: 20 });
+    expect(on.searchParams.get('monitor')).toBe('true');
+    expect(on.searchParams.get('mobile')).toBe('true');
+    expect(on.searchParams.has('providers_id')).toBe(false);
+  });
+
+  it('sends no radius without coordinates', async () => {
+    const url = await requestedUrl({ bbox: '77.0,28.4,77.4,28.8', radius: 5000, limit: 20 });
+    expect(url.searchParams.has('radius')).toBe(false);
+    expect(url.searchParams.get('bbox')).toBe('77.0,28.4,77.4,28.8');
   });
 });
