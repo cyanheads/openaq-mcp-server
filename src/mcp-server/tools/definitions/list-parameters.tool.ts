@@ -38,14 +38,14 @@ const isPollutant = (p: OpenAqParameter): boolean => {
 export const listParameters = tool('openaq_list_parameters', {
   title: 'openaq-mcp-server: list parameters',
   description:
-    "Catalog of every measurable pollutant and its canonical unit: id, code, display name, unit, and a one-line description (pm25, pm10, o3, no2, so2, co, bc, and ~38 more). This is the unit-disambiguation reference — the same pollutant exists under several ids with different units (CO is id 4 in µg/m³, id 8 in ppm, id 102 in ppb), so use this to pick the exact parametersId for openaq_find_locations / openaq_get_readings / openaq_get_measurements and to interpret a reading's unit. A small bounded catalog fetched live from OpenAQ.",
+    "Catalog of every measurable pollutant and its canonical unit: id, code, display name, unit, and a one-line description (pm25, pm10, o3, no2, so2, co, bc, and more). This is the unit-disambiguation reference — the same pollutant exists under several ids with different units (CO is id 4 in µg/m³, id 8 in ppm, id 102 in ppb), so use this to pick the exact parametersId for openaq_find_locations / openaq_get_readings / openaq_get_measurements and to interpret a reading's unit. A small bounded catalog fetched live from OpenAQ.",
   annotations: { readOnlyHint: true, idempotentHint: true },
   input: z.object({
     query: z
       .string()
       .optional()
       .describe(
-        'Case-insensitive filter over the bounded parameter catalog (~44) by code, display name, and description (e.g. "pm" for particulates, "ozone", "co"). Omit to list everything.',
+        'Case-insensitive filter over the bounded parameter catalog by code, display name, and description (e.g. "pm" for particulates, "ozone", "co"). Omit to list everything.',
       ),
     pollutantsOnly: z
       .boolean()
