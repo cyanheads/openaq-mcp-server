@@ -32,22 +32,23 @@ const ISO_REGEX = /^(?:[A-Za-z]{2}|-99)$/;
 const normalizeIso = (value: unknown): unknown =>
   typeof value === 'string' ? value.trim().toUpperCase() : value;
 
-/** Reshape a raw location into the tool's domain output, sensors[] → parameters[]. */
+/**
+ * Reshape a raw location into the tool's domain output, sensors[] → parameters[].
+ * A value OpenAQ omits stays null — a point needs both latitude and longitude.
+ */
 function shapeLocation(loc: OpenAqLocation) {
+  const { latitude, longitude } = loc.coordinates ?? {};
   return {
     id: loc.id,
     name: loc.name ?? `location ${loc.id}`,
     locality: loc.locality,
-    country: {
-      code: loc.country?.code ?? 'XX',
-      name: loc.country?.name ?? 'Unknown',
-    },
-    coordinates: {
-      latitude: loc.coordinates?.latitude ?? 0,
-      longitude: loc.coordinates?.longitude ?? 0,
-    },
+    country: loc.country ? { code: loc.country.code, name: loc.country.name } : null,
+    coordinates:
+      typeof latitude === 'number' && typeof longitude === 'number'
+        ? { latitude, longitude }
+        : null,
     distanceMeters: loc.distance,
-    provider: loc.provider?.name ?? 'Unknown',
+    provider: loc.provider?.name ?? null,
     providerId: loc.provider?.id ?? null,
     isMonitor: loc.isMonitor,
     isMobile: loc.isMobile,
@@ -160,20 +161,27 @@ export const findLocations = tool('openaq_find_locations', {
                   ),
                 name: z.string().describe('Country name'),
               })
-              .describe('Country the station is in'),
+              .nullable()
+              .describe('Country the station is in. Null when OpenAQ lists none.'),
             coordinates: z
               .object({
                 latitude: z.number().describe('Station latitude (decimal degrees)'),
                 longitude: z.number().describe('Station longitude (decimal degrees)'),
               })
-              .describe('Station location'),
+              .nullable()
+              .describe('Station location. Null when OpenAQ lists no latitude or no longitude.'),
             distanceMeters: z
               .number()
               .nullable()
               .describe(
                 'Distance from the query coordinates in metres. Null when searching by bbox or iso (no center point).',
               ),
-            provider: z.string().describe('Data provider / network (e.g. "AirNow", "OpenAQ LCS")'),
+            provider: z
+              .string()
+              .nullable()
+              .describe(
+                'Data provider / network (e.g. "AirNow", "OpenAQ LCS"). Null when OpenAQ lists none.',
+              ),
             providerId: z
               .number()
               .nullable()
@@ -434,10 +442,20 @@ export const findLocations = tool('openaq_find_locations', {
         loc.parameters
           .map((p) => `${p.name} #${p.id} (${p.unit}, ${p.displayName ?? 'no display name'})`)
           .join(', ') || 'none';
+      const country = loc.country
+        ? `${loc.country.name} (${loc.country.code})`
+        : 'country not listed by OpenAQ';
+      const provider =
+        loc.provider === null
+          ? 'not listed by OpenAQ'
+          : `${loc.provider} (providersId ${loc.providerId})`;
+      const coords = loc.coordinates
+        ? `${loc.coordinates.latitude}, ${loc.coordinates.longitude}`
+        : 'not listed by OpenAQ';
       return [
         `## ${loc.name} — id ${loc.id}`,
-        `${loc.country.name} (${loc.country.code}) · locality: ${locality} · ${dist} · ${kind} · ${mobile} · provider: ${loc.provider} (${loc.providerId != null ? `providersId ${loc.providerId}` : 'no provider id'})`,
-        `coords: ${loc.coordinates.latitude}, ${loc.coordinates.longitude}`,
+        `${country} · locality: ${locality} · ${dist} · ${kind} · ${mobile} · provider: ${provider}`,
+        `coords: ${coords}`,
         `data span: ${first} → ${last}`,
         `parameters: ${params}`,
       ].join('\n');

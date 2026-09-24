@@ -17,14 +17,15 @@ import { getOpenAqService } from '@/services/openaq/openaq-service.js';
 import type { OpenAqLocation } from '@/services/openaq/types.js';
 
 /**
- * Candidate pool pulled when auto-resolving the nearest station from coordinates.
- * OpenAQ /v3/locations is not distance-sorted, so `limit: 1` can return a far
- * station; we fetch a pool and let the service's distance sort surface the true
- * nearest at results[0]. Capped at 100 (the find_locations page cap) rather than the
- * API max — a single coordinate+radius query rarely yields more matching stations,
- * so the nearest is effectively always in the pool.
+ * Candidate pool pulled when auto-resolving the nearest station from coordinates —
+ * OpenAQ's page maximum (1001 is rejected with a 422). /v3/locations pages in
+ * ascending id order, not by distance, so a smaller pool drops the newest stations
+ * and can miss the nearest one: dense 25 km searches match a few hundred stations
+ * (283 around Los Angeles for PM2.5). The service's distance sort then surfaces the
+ * nearest of the page at results[0]. A page that comes back full may leave matches
+ * uncompared, which the handler discloses rather than paging on.
  */
-const NEAREST_CANDIDATE_LIMIT = 100;
+const NEAREST_CANDIDATE_LIMIT = 1000;
 
 /**
  * Radius for the nearest-station sweep — the API's hard maximum, so a miss here
@@ -36,7 +37,7 @@ const NEAREST_SEARCH_RADIUS_M = 25_000;
 export const getReadings = tool('openaq_get_readings', {
   title: 'openaq-mcp-server: get readings',
   description:
-    'Latest measured value for every sensor at a monitoring station — the current-conditions tool. Returns one record per parameter, each with the value, its unit, the UTC and local timestamp, and the sensor id, joined so every value carries its pollutant and unit (the raw latest feed is keyed only by sensor id). Pass a locationId from openaq_find_locations, or pass coordinates to auto-resolve to the nearest station that measures the requested parametersId. Data recency varies by station reporting cadence — read each value\'s timestamp to know whether "latest" is minutes or hours old. These are measured observations with coverage gaps, not a modeled grid.',
+    'Latest measured value for every sensor at a monitoring station — the current-conditions tool. Returns one record per parameter, each with the value, its unit, the UTC and local timestamp, and the sensor id, joined so every value carries its pollutant and unit (the raw latest feed is keyed only by sensor id). The station block names its provider (for attribution) and timezone. Pass a locationId from openaq_find_locations, or pass coordinates to auto-resolve to the nearest station that measures the requested parametersId. Data recency varies by station reporting cadence — read each value\'s timestamp to know whether "latest" is minutes or hours old. These are measured observations with coverage gaps, not a modeled grid.',
   annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true },
   input: z.object({
     locationId: z
@@ -69,7 +70,20 @@ export const getReadings = tool('openaq_get_readings', {
             latitude: z.number().describe('Station latitude (decimal degrees)'),
             longitude: z.number().describe('Station longitude (decimal degrees)'),
           })
-          .describe('Station coordinates'),
+          .nullable()
+          .describe('Station coordinates. Null when OpenAQ lists no latitude or no longitude.'),
+        provider: z
+          .string()
+          .nullable()
+          .describe(
+            'Network that operates the station (e.g. "AirNow") — cite it alongside OpenAQ. Null when OpenAQ lists none.',
+          ),
+        providerId: z
+          .number()
+          .nullable()
+          .describe(
+            'Provider id, usable as providersId in openaq_find_locations. Null when OpenAQ lists none.',
+          ),
         timezone: z.string().nullable().describe('IANA timezone of the station'),
         distanceMeters: z
           .number()
@@ -119,7 +133,9 @@ export const getReadings = tool('openaq_get_readings', {
     notice: z
       .string()
       .optional()
-      .describe('Guidance when the station resolved but returned no recent values.'),
+      .describe(
+        'Set when coordinate resolution compared a full 1,000-station page: more stations may match, so the station returned is the nearest of the first 1,000 OpenAQ lists, not necessarily the nearest overall.',
+      ),
   },
   errors: [
     {
@@ -232,8 +248,8 @@ export const getReadings = tool('openaq_get_readings', {
     let distanceMeters: number | null = null;
 
     if (hasCoordinates) {
-      // Pull a candidate pool (not limit:1) so the service's distance sort can pick
-      // the true nearest — upstream order alone can surface a farther station first.
+      // Pull a full page so the service's distance sort can pick the true nearest —
+      // upstream order is by id, so a short pool leaves the newest stations out.
       const found = await withUpstream(ctx, () =>
         service.findLocations(
           {
@@ -255,6 +271,11 @@ export const getReadings = tool('openaq_get_readings', {
       }
       locationId = nearest.id;
       distanceMeters = nearest.distance;
+      if (found.results.length >= NEAREST_CANDIDATE_LIMIT) {
+        ctx.enrich.notice(
+          `OpenAQ returned a full page of ${NEAREST_CANDIDATE_LIMIT.toLocaleString('en-US')} stations within ${NEAREST_SEARCH_RADIUS_M / 1000}km measuring parameter ${input.parametersId}, so more may match: station ${nearest.id} is the nearest of the first ${NEAREST_CANDIDATE_LIMIT.toLocaleString('en-US')} OpenAQ lists (in station-id order), not necessarily the nearest overall. To check, search openaq_find_locations around these coordinates with a radius small enough that the page comes back short of its limit, then pass the nearest locationId here.`,
+        );
+      }
     } else {
       locationId = input.locationId as number;
     }
@@ -338,14 +359,18 @@ export const getReadings = tool('openaq_get_readings', {
 
     ctx.log.info('Resolved readings', { locationId, count: readings.length });
 
+    // A point is only a point when both sides are known.
+    const { latitude, longitude } = location.coordinates ?? {};
     return {
       location: {
         id: location.id,
         name: location.name ?? `location ${location.id}`,
-        coordinates: {
-          latitude: location.coordinates?.latitude ?? 0,
-          longitude: location.coordinates?.longitude ?? 0,
-        },
+        coordinates:
+          typeof latitude === 'number' && typeof longitude === 'number'
+            ? { latitude, longitude }
+            : null,
+        provider: location.provider?.name ?? null,
+        providerId: location.provider?.id ?? null,
         timezone: location.timezone,
         distanceMeters,
         datetimeLast: location.datetimeLast,
@@ -362,11 +387,17 @@ export const getReadings = tool('openaq_get_readings', {
       : 'station has never reported';
     const dist =
       loc.distanceMeters != null ? ` · ${Math.round(loc.distanceMeters)}m from query` : '';
-    const meta = `coords: ${loc.coordinates.latitude}, ${loc.coordinates.longitude} · timezone: ${loc.timezone ?? 'n/a'}`;
+    const coords = loc.coordinates
+      ? `${loc.coordinates.latitude}, ${loc.coordinates.longitude}`
+      : 'not listed by OpenAQ';
+    const meta = `coords: ${coords} · timezone: ${loc.timezone ?? 'n/a'}`;
+    const provider = `provider: ${loc.provider === null ? 'not listed by OpenAQ' : `${loc.provider} (providerId ${loc.providerId})`}`;
     const rows = result.readings.map(
       (r) =>
         `- **${r.parameter.displayName ?? r.parameter.name}** (\`${r.parameter.name}\` #${r.parameter.id}): ${displayNumber(r.value)} ${r.unit} · ${r.datetimeUtc} (local ${r.datetimeLocal}) · sensor ${r.sensorId}`,
     );
-    return [{ type: 'text', text: [head, `${last}${dist}`, meta, '', ...rows].join('\n') }];
+    return [
+      { type: 'text', text: [head, `${last}${dist}`, meta, provider, '', ...rows].join('\n') },
+    ];
   },
 });

@@ -390,7 +390,7 @@ describe('openaq_find_locations → OpenAQ query string', () => {
     serveLocations([{ ...sparseLocation, country: { id: 7, code: '-99', name: 'Dhekelia' } }]);
     const result = await run({ iso: '-99' });
     expect(requested[0]!.searchParams.get('iso')).toBe('-99');
-    expect(result.locations[0]?.country.code).toBe('-99');
+    expect(result.locations[0]?.country?.code).toBe('-99');
   });
 
   it.each([
@@ -850,7 +850,7 @@ describe('openaq_find_locations station filters (#31)', () => {
     expect(err.data.recovery.hint).toMatch(/larger bbox/);
   });
 
-  it('carries each location provider id, null when OpenAQ lists no provider', async () => {
+  it('carries each location provider and id, both null when OpenAQ lists no provider (#40)', async () => {
     installStubService({
       findLocations: async () => ({
         meta: { found: 2 },
@@ -863,7 +863,7 @@ describe('openaq_find_locations station filters (#31)', () => {
     );
     expect(result.locations.map((l) => [l.provider, l.providerId])).toEqual([
       ['AirNow', 119],
-      ['Unknown', null],
+      [null, null],
     ]);
   });
 
@@ -880,7 +880,84 @@ describe('openaq_find_locations station filters (#31)', () => {
     });
     const text = contentText(result);
     expect(text).toContain('provider: AirNow (providersId 119)');
-    expect(text).toContain('provider: Unknown (no provider id)');
+    expect(text).toContain('provider: not listed by OpenAQ');
+    expect(text).not.toContain('Unknown');
+  });
+});
+
+describe('openaq_find_locations missing upstream values stay missing (#40)', () => {
+  /** Serve one populated station beside `sparse`, and return the assembled result. */
+  const runWith = async (sparse: OpenAqLocation) => {
+    installStubService({
+      findLocations: async () => ({ meta: { found: 2 }, results: [seattleLocation, sparse] }),
+    });
+    return runToolContract(findLocations, { bbox: '-122.5,47.4,-122.1,47.8' });
+  };
+
+  /** The rendered block for station `id` — one `## ` section of the text. */
+  const blockFor = (text: string, id: number): string =>
+    text.split('\n\n').find((block) => block.includes(`— id ${id}`)) ?? '';
+
+  it.each([
+    ['only latitude null', { latitude: null, longitude: -122.3 }],
+    ['only longitude null', { latitude: 47.6, longitude: null }],
+    ['coordinates null', null],
+  ])('yields coordinates: null with %s, never 0', async (_label, coordinates) => {
+    const result = await runWith({ ...sparseLocation, coordinates });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      locations: [
+        { coordinates: { latitude: 47.5972, longitude: -122.3197 } },
+        { coordinates: null },
+      ],
+    });
+    const block = blockFor(contentText(result), 42);
+    expect(block).toContain('coords: not listed by OpenAQ');
+    expect(block).not.toMatch(/coords: [^\n]*\b0\b/);
+    expect(block).not.toContain('Unknown');
+    // The populated station beside it renders as before.
+    expect(blockFor(contentText(result), 931)).toContain('coords: 47.5972, -122.3197');
+  });
+
+  it('yields country: null, rendered without an XX code or an Unknown name', async () => {
+    const result = await runWith({ ...sparseLocation, country: null });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      locations: [{ country: { code: 'US', name: 'United States' } }, { country: null }],
+    });
+    const block = blockFor(contentText(result), 42);
+    expect(block).toContain('country not listed by OpenAQ · locality: n/a');
+    expect(block).not.toContain('XX');
+    expect(block).not.toContain('Unknown');
+  });
+
+  it('keeps every other field when coordinates, country, and provider are all missing', async () => {
+    const result = await runWith({
+      ...sparseLocation,
+      coordinates: null,
+      country: null,
+      provider: null,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      locations: [
+        { id: 931 },
+        {
+          id: 42,
+          coordinates: null,
+          country: null,
+          provider: null,
+          providerId: null,
+          parameters: [{ id: 2, name: 'pm25', unit: 'µg/m³' }],
+        },
+      ],
+    });
+    const block = blockFor(contentText(result), 42);
+    expect(block).toBe(`## location 42 — id 42
+country not listed by OpenAQ · locality: n/a · no distance · low-cost sensor · fixed · provider: not listed by OpenAQ
+coords: not listed by OpenAQ
+data span: unknown → never reported
+parameters: pm25 #2 (µg/m³, no display name)`);
   });
 });
 
@@ -915,6 +992,46 @@ describe('openaq_find_locations assembled result (runToolContract)', () => {
     expect(text).toContain(
       'United States (US) · locality: Seattle-Tacoma-Bellevue · 1365m away · reference monitor · fixed · provider: AirNow',
     );
+  });
+});
+
+describe('openaq_find_locations populated rendering (characterization)', () => {
+  it('renders a fully populated station exactly', async () => {
+    installStubService({
+      findLocations: async () => ({ meta: { found: 1 }, results: [seattleLocation] }),
+    });
+    const result = await runToolContract(findLocations, { coordinates: '47.6062,-122.3321' });
+    expect(result.structuredContent).toMatchObject({
+      locations: [
+        {
+          country: { code: 'US', name: 'United States' },
+          coordinates: { latitude: 47.5972, longitude: -122.3197 },
+          provider: 'AirNow',
+          providerId: 119,
+        },
+      ],
+    });
+    expect(
+      (findLocations.format!(result.structuredContent as never)[0] as { text: string }).text,
+    ).toBe(`## Seattle-10th & Weller — id 931
+United States (US) · locality: Seattle-Tacoma-Bellevue · 1365m away · reference monitor · fixed · provider: AirNow (providersId 119)
+coords: 47.5972, -122.3197
+data span: 2016-03-15T20:00:00Z (local 2016-03-15T13:00:00-07:00) → 2026-06-13T19:00:00Z (local 2026-06-13T12:00:00-07:00)
+parameters: pm25 #2 (µg/m³, PM2.5), co #8 (ppm, CO)`);
+  });
+
+  it('renders a sparse station with populated country, coordinates, and provider exactly', async () => {
+    installStubService({
+      findLocations: async () => ({ meta: { found: 1 }, results: [sparseLocation] }),
+    });
+    const result = await runToolContract(findLocations, { bbox: '77.0,28.4,77.4,28.8' });
+    expect(
+      (findLocations.format!(result.structuredContent as never)[0] as { text: string }).text,
+    ).toBe(`## location 42 — id 42
+India (IN) · locality: n/a · no distance · low-cost sensor · fixed · provider: OpenAQ LCS (providersId 99)
+coords: 28.6, 77.2
+data span: unknown → never reported
+parameters: pm25 #2 (µg/m³, no display name)`);
   });
 });
 

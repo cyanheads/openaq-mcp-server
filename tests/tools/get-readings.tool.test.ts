@@ -21,8 +21,10 @@ import {
 } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetServerConfig } from '@/config/server-config.js';
 import { getReadings } from '@/mcp-server/tools/definitions/get-readings.tool.js';
-import { setOpenAqService } from '@/services/openaq/openaq-service.js';
+import { OpenAqService, setOpenAqService } from '@/services/openaq/openaq-service.js';
+import type { OpenAqLocation } from '@/services/openaq/types.js';
 import { seattleLatest, seattleLocation } from '../fixtures/openaq.js';
 import { installStubService } from '../fixtures/stub-service.js';
 
@@ -42,7 +44,19 @@ async function rejection(run: unknown): Promise<McpError> {
   throw new Error('Expected the handler to reject.');
 }
 
-afterEach(() => setOpenAqService(undefined as never));
+/** Concatenated text of every content block — the domain render plus the enrichment trailer. */
+const contentText = (result: { content: readonly { type: string; text?: string }[] }): string =>
+  result.content.map((block) => (block.type === 'text' ? (block.text ?? '') : '')).join('\n');
+
+/** Every OpenAQ call goes through a stub or a test-installed fetch; anything else fails loudly. */
+beforeEach(() => {
+  vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('unmocked fetch in a unit test'));
+});
+
+afterEach(() => {
+  setOpenAqService(undefined as never);
+  vi.restoreAllMocks();
+});
 
 describe('openaq_get_readings', () => {
   it('joins latest values to pollutant + unit via the sensor map (the headline goal)', async () => {
@@ -78,9 +92,9 @@ describe('openaq_get_readings', () => {
       getReadings.input.parse({ coordinates: '47.6,-122.3', parametersId: 2 }),
       ctx,
     );
-    // Nearest resolution pulls a candidate pool (not limit:1) so the distance sort
-    // can surface the true nearest; radius 25000 + the parameter filter still apply.
-    expect(findArgs).toMatchObject({ radius: 25000, parametersId: 2, limit: 100 });
+    // Nearest resolution pulls OpenAQ's full 1,000-row page so the distance sort can
+    // surface the true nearest; radius 25000 + the parameter filter still apply.
+    expect(findArgs).toMatchObject({ radius: 25000, parametersId: 2, limit: 1000 });
     expect(result.location.distanceMeters).toBe(1364.84);
     expect(result.readings.length).toBeGreaterThan(0);
   });
@@ -331,6 +345,8 @@ describe('openaq_get_readings', () => {
         id: 931,
         name: 'Seattle-10th & Weller',
         coordinates: { latitude: 47.6, longitude: -122.3 },
+        provider: 'AirNow',
+        providerId: 119,
         timezone: 'America/Los_Angeles',
         distanceMeters: null,
         datetimeLast: { utc: '2026-06-13T19:00:00Z', local: '2026-06-13T12:00:00-07:00' },
@@ -374,6 +390,251 @@ describe('openaq_get_readings', () => {
     expect(text).toContain('2.0875');
     expect(text).not.toContain('0.019899999999999998');
     expect(text).not.toContain('2.0874999999999995');
+  });
+});
+
+describe('openaq_get_readings populated rendering (characterization)', () => {
+  it('keeps the station block and reading rows for a fully populated station', async () => {
+    installStubService({
+      getLocation: async () => seattleLocation,
+      getLatest: async () => seattleLatest,
+    });
+    const result = await runToolContract(getReadings, { locationId: 931 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      location: {
+        id: 931,
+        name: 'Seattle-10th & Weller',
+        coordinates: { latitude: 47.5972, longitude: -122.3197 },
+        timezone: 'America/Los_Angeles',
+        distanceMeters: null,
+        datetimeLast: { utc: '2026-06-13T19:00:00Z', local: '2026-06-13T12:00:00-07:00' },
+      },
+    });
+    const lines = contentText(result).split('\n');
+    expect(lines.slice(0, 3)).toEqual([
+      '## Seattle-10th & Weller — id 931',
+      'latest data: 2026-06-13T19:00:00Z (local 2026-06-13T12:00:00-07:00)',
+      'coords: 47.5972, -122.3197 · timezone: America/Los_Angeles',
+    ]);
+    expect(lines).toContain(
+      '- **PM2.5** (`pm25` #2): 3.4 µg/m³ · 2026-06-13T19:00:00Z (local 2026-06-13T12:00:00-07:00) · sensor 1701',
+    );
+    expect(lines).toContain(
+      '- **CO** (`co` #8): 0.2 ppm · 2026-06-13T19:00:00Z (local 2026-06-13T12:00:00-07:00) · sensor 1708',
+    );
+  });
+});
+
+/**
+ * The handler driven through the real OpenAqService down to `fetch`, so the query
+ * string OpenAQ receives and the service's distance sort both sit inside the seam.
+ * The fake `/v3/locations` honors `limit` the way OpenAQ does: rows come back in
+ * ascending id order, cut at the page size, so a small pool drops the newest ids.
+ */
+describe('openaq_get_readings nearest-station candidate pool (#22)', () => {
+  let requested: URL[];
+
+  /**
+   * `count` candidates in ascending id order, all measuring parameter 2. Distance
+   * falls slowly with row index (24000 m → ~14000 m), except the row at
+   * `nearestAt`, which is the true nearest at 937.33 m.
+   */
+  const makePool = (count: number, nearestAt: number): OpenAqLocation[] =>
+    Array.from({ length: count }, (_, i) => ({
+      ...seattleLocation,
+      id: 100_000 + i,
+      name: `Candidate ${i}`,
+      distance: i === nearestAt ? 937.33 : 24_000 - i * 10,
+    }));
+
+  /** Serve the pool on `/v3/locations`, and any candidate's detail + latest feed by id. */
+  const serveUpstream = (pool: OpenAqLocation[]) => {
+    vi.mocked(globalThis.fetch).mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      requested.push(url);
+      const json = (body: unknown) =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      if (url.pathname === '/v3/locations') {
+        const limit = Number(url.searchParams.get('limit'));
+        const page = pool.slice(0, limit);
+        return json({
+          meta: { found: page.length === limit ? `>${limit}` : page.length },
+          results: page,
+        });
+      }
+      const [, id, latest] = url.pathname.match(/^\/v3\/locations\/(\d+)(\/latest)?$/) ?? [];
+      const location = pool.find((l) => l.id === Number(id)) ?? {
+        ...seattleLocation,
+        id: Number(id),
+      };
+      if (latest) {
+        return json({ results: seattleLatest.map((l) => ({ ...l, locationsId: location.id })) });
+      }
+      return json({ results: [location] });
+    });
+  };
+
+  const searches = () => requested.filter((u) => u.pathname === '/v3/locations');
+
+  beforeEach(() => {
+    requested = [];
+    vi.stubEnv('OPENAQ_API_KEY', 'test-key');
+    vi.stubEnv('OPENAQ_API_BASE_URL', 'https://api.openaq.org/v3');
+    resetServerConfig();
+    setOpenAqService(new OpenAqService({} as never, {} as never));
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetServerConfig();
+  });
+
+  const byCoordinates = { coordinates: '34.0522,-118.2437', parametersId: 2 };
+
+  it('requests the 1,000-row page cap at the 25 km radius, filtered to the parameter', async () => {
+    serveUpstream(makePool(283, 275));
+    await runToolContract(getReadings, byCoordinates);
+    expect(searches()).toHaveLength(1);
+    const qs = searches()[0]!.searchParams;
+    expect(qs.get('limit')).toBe('1000');
+    expect(qs.get('radius')).toBe('25000');
+    expect(qs.get('parameters_id')).toBe('2');
+    expect(qs.get('coordinates')).toBe('34.0522,-118.2437');
+  });
+
+  it('finds the nearest station when it sits past row 100 of the id-ordered list', async () => {
+    serveUpstream(makePool(283, 275));
+    const result = await runToolContract(getReadings, byCoordinates);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      location: { id: 100_275, distanceMeters: 937.33 },
+    });
+    expect(contentText(result)).toContain('## Candidate 275 — id 100275');
+    expect(contentText(result)).toContain('937m from query');
+    // A pool under the page cap compared every match, so nothing is disclosed.
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('discloses a full 1,000-row pool as the nearest of the first 1,000 on both surfaces', async () => {
+    serveUpstream(makePool(1000, 999));
+    const result = await runToolContract(getReadings, byCoordinates);
+    expect(result.isError).toBeFalsy();
+    const structured = result.structuredContent as { location: { id: number }; notice?: string };
+    expect(structured.location.id).toBe(100_999);
+    expect(structured.notice).toMatch(/nearest of the first 1,000/);
+    expect(structured.notice).toMatch(/not necessarily the nearest/);
+    expect(contentText(result)).toContain(structured.notice as string);
+  });
+
+  it('sets no notice on a 999-row pool, and still reaches its last row', async () => {
+    serveUpstream(makePool(999, 998));
+    const result = await runToolContract(getReadings, byCoordinates);
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ location: { id: 100_998 } });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(contentText(result)).not.toMatch(/first 1,000/);
+  });
+
+  it('still fails an empty pool with no_station_near_coordinates', async () => {
+    serveUpstream([]);
+    const result = await runToolContract(getReadings, byCoordinates);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      error: { data: { reason: 'no_station_near_coordinates' } },
+    });
+    expect(searches()[0]!.searchParams.get('limit')).toBe('1000');
+  });
+
+  it('makes no /v3/locations search when called by locationId', async () => {
+    serveUpstream(makePool(5, 0));
+    const result = await runToolContract(getReadings, { locationId: 100_003 });
+    expect(result.isError).toBeFalsy();
+    expect(searches()).toHaveLength(0);
+    expect(requested.map((u) => u.pathname).sort()).toEqual([
+      '/v3/locations/100003',
+      '/v3/locations/100003/latest',
+    ]);
+  });
+});
+
+describe('openaq_get_readings station provider (#30)', () => {
+  it('returns provider and providerId on both surfaces by locationId, in two requests', async () => {
+    const findLocations = vi.fn();
+    const getLocation = vi.fn(async () => seattleLocation);
+    const getLatest = vi.fn(async () => seattleLatest);
+    installStubService({ findLocations, getLocation, getLatest });
+    const result = await runToolContract(getReadings, { locationId: 931 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      location: {
+        provider: 'AirNow',
+        providerId: 119,
+        timezone: 'America/Los_Angeles',
+      },
+    });
+    expect(contentText(result)).toContain('provider: AirNow (providerId 119)');
+    expect(findLocations).not.toHaveBeenCalled();
+    expect(getLocation).toHaveBeenCalledTimes(1);
+    expect(getLatest).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns provider and providerId by coordinates, in three requests', async () => {
+    const findLocations = vi.fn(async () => ({ meta: { found: 1 }, results: [seattleLocation] }));
+    const getLocation = vi.fn(async () => seattleLocation);
+    const getLatest = vi.fn(async () => seattleLatest);
+    installStubService({ findLocations, getLocation, getLatest });
+    const result = await runToolContract(getReadings, {
+      coordinates: '47.6062,-122.3321',
+      parametersId: 2,
+    });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      location: { id: 931, provider: 'AirNow', providerId: 119 },
+    });
+    expect(contentText(result)).toContain('provider: AirNow (providerId 119)');
+    expect(findLocations).toHaveBeenCalledTimes(1);
+    expect(getLocation).toHaveBeenCalledTimes(1);
+    expect(getLatest).toHaveBeenCalledTimes(1);
+  });
+
+  it('yields null provider and providerId when OpenAQ lists none — never "Unknown"', async () => {
+    installStubService({
+      getLocation: async () => ({ ...seattleLocation, provider: null }),
+      getLatest: async () => seattleLatest,
+    });
+    const result = await runToolContract(getReadings, { locationId: 931 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({
+      location: { provider: null, providerId: null },
+    });
+    const text = contentText(result);
+    expect(text).toContain('provider: not listed by OpenAQ');
+    expect(text).not.toMatch(/unknown/i);
+    expect(text).not.toContain('null');
+  });
+});
+
+describe('openaq_get_readings missing coordinates stay missing (#40)', () => {
+  it.each([
+    ['only latitude null', { latitude: null, longitude: -122.3197 }],
+    ['only longitude null', { latitude: 47.5972, longitude: null }],
+    ['coordinates null', null],
+  ])('yields coordinates: null with %s, never 0', async (_label, coordinates) => {
+    installStubService({
+      getLocation: async () => ({ ...seattleLocation, coordinates }),
+      getLatest: async () => seattleLatest,
+    });
+    const result = await runToolContract(getReadings, { locationId: 931 });
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent).toMatchObject({ location: { coordinates: null } });
+    const text = contentText(result);
+    expect(text).toContain('coords: not listed by OpenAQ · timezone: America/Los_Angeles');
+    expect(text).not.toMatch(/coords: [^\n·]*\b0\b/);
+    expect(text).not.toMatch(/unknown/i);
+    expect(text).not.toContain('null');
   });
 });
 
