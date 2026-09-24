@@ -25,7 +25,7 @@ export const listCountries = tool('openaq_list_countries', {
       .string()
       .optional()
       .describe(
-        'Case-insensitive filter over the country catalog by code and name. A two-letter query is treated as an exact ISO 3166-1 alpha-2 code (e.g. "US" → United States); longer queries match as substrings (e.g. "united", "germany"). Omit to page through the whole catalog.',
+        'Case-insensitive filter over the country catalog by code and name. A two-letter query matches an exact ISO 3166-1 alpha-2 code first (e.g. "US" → United States) and falls back to substrings when no code matches; longer queries match as substrings (e.g. "united", "germany"). Omit to page through the whole catalog.',
       ),
     parametersId: z
       .number()
