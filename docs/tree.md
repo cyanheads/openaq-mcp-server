@@ -1,6 +1,6 @@
 # openaq-mcp-server - Directory Structure
 
-Generated on: 2026-09-24 07:15:13
+Generated on: 2026-09-26 21:12:38
 
 ```text
 openaq-mcp-server/
@@ -147,6 +147,7 @@ openaq-mcp-server/
 │   │   └── tools/
 │   │       ├── definitions/
 │   │       │   ├── dataframe-describe.tool.ts
+│   │       │   ├── dataframe-drop.tool.ts
 │   │       │   ├── dataframe-query.tool.ts
 │   │       │   ├── find-locations.tool.ts
 │   │       │   ├── get-measurements.tool.ts
@@ -174,6 +175,8 @@ openaq-mcp-server/
 │   ├── services/
 │   │   └── openaq-service.test.ts
 │   └── tools/
+│       ├── dataframe-drop-registration.test.ts
+│       ├── dataframe-drop.tool.test.ts
 │       ├── dataframe-tools.test.ts
 │       ├── find-locations.tool.test.ts
 │       ├── geo-input.test.ts
@@ -181,6 +184,7 @@ openaq-mcp-server/
 │       ├── get-readings.tool.test.ts
 │       ├── list-countries.tool.test.ts
 │       ├── list-parameters.tool.test.ts
+│       ├── measurement-canvas.test.ts
 │       └── upstream-errors.test.ts
 ├── .dockerignore
 ├── .env.example

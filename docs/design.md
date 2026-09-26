@@ -14,15 +14,16 @@ actual reading from a physical monitor — sparser, unevenly distributed, but re
 |:-----|:------------|:-----------|:------------|
 | `openaq_find_locations` | Find air-quality monitoring stations (measured, not modeled) near a point, in a bounding box, or by country. Returns location id, name, coordinates, distance, country, provider, the parameters each measures, and `datetimeLast`. Required first step — readings and measurements key on the location/sensor ids this returns. A missing station means no coverage, not clean air. | `coordinates`, `radius`, `bbox`, `iso`, `parametersId`, `monitor`, `mobile`, `providersId`, `limit`, `page` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
 | `openaq_get_readings` | Latest measured value for every sensor at a location (or the nearest location to coordinates). Returns per parameter: value, unit, UTC + local timestamp, and the sensor id — joined so each value carries its pollutant and unit — plus the station's provider and timezone. The current-conditions tool. Recency varies by station; each value's timestamp shows whether "latest" is minutes or hours old. | `locationId` \| (`coordinates` + `parametersId`), `parametersId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
-| `openaq_get_measurements` | Historical measurement series for one parameter at a location over a date range. Resolves the location's sensor for that parameter internally (measurements are sensor-scoped in v3) so you pass a location, not a sensor. Optional `aggregation` (`raw`/`hourly`/`daily`) — `daily` adds a per-day statistical summary. The pulled rows stage on a DataCanvas when the series overflows the inline preview or a `canvas_id` was supplied; the response carries `canvasId` + `tableName` and names the path to read them — `openaq_dataframe_describe`, then `openaq_dataframe_query`. | `locationId`, `parametersId`, `datetimeFrom`, `datetimeTo`, `aggregation`, `canvasId` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
+| `openaq_get_measurements` | Historical measurement series for one parameter at a location over a date range. Resolves the location's sensor for that parameter internally (measurements are sensor-scoped in v3) so you pass a location, not a sensor. Optional `aggregation` (`raw`/`hourly`/`daily`) — `daily` adds a per-day statistical summary. The pulled rows stage on a DataCanvas when the series overflows the inline preview or a `canvas_id` was supplied; the response carries `canvasId` + `tableName` and names the path to read them — `openaq_dataframe_describe`, then `openaq_dataframe_query`. | `locationId`, `parametersId`, `datetimeFrom`, `datetimeTo`, `aggregation`, `canvas_id` | `readOnlyHint`, `idempotentHint`, `openWorldHint` |
 | `openaq_list_parameters` | Catalog of measurable pollutants and their canonical units: id, code, display name, unit, description (pm25, pm10, o3, no2, so2, co, bc, …). The unit-disambiguation tool — the same pollutant exists under several ids with different units (`co` is id 4 µg/m³, id 8 ppm, id 102 ppb). Call this to pick the right `parametersId` and to interpret a reading's unit. | `query` (local filter), `pollutantsOnly` | `readOnlyHint`, `idempotentHint` |
 | `openaq_list_countries` | Catalog of country coverage: id, OpenAQ country code, name, station-data date span (`datetimeFirst`/`datetimeLast`), and the parameters measured anywhere in that country. Availability check before a regional `openaq_find_locations` sweep — answers "which countries have NO2 monitoring?". Pages the filtered catalog. | `query`, `parametersId` (local filters), `limit`, `page` | `readOnlyHint`, `idempotentHint` |
-| `openaq_dataframe_query` | Run a read-only SQL `SELECT` against the measurement tables `openaq_get_measurements` staged on a DataCanvas. Reference tables by the name the measurements call returned (`measurements_<sensorId>`). For aggregation and cross-sensor comparison over series too large to inline. Responses are capped at 200 rows, with `truncated` and a notice naming the `ORDER BY … LIMIT … OFFSET` continuation. | `canvasId`, `sql` | `readOnlyHint` |
-| `openaq_dataframe_describe` | List the tables and columns staged on a DataCanvas so you can write valid SQL for `openaq_dataframe_query` without guessing column names. | `canvasId` | `readOnlyHint` |
+| `openaq_dataframe_query` | Run a read-only SQL `SELECT` against the measurement tables `openaq_get_measurements` staged on a DataCanvas. Reference tables by the name the measurements call returned (`measurements_<sensorId>`). For aggregation and cross-sensor comparison over series too large to inline. Responses are capped at 200 rows, with `truncated` and a notice naming the `ORDER BY … LIMIT … OFFSET` continuation. | `canvas_id`, `sql` | `readOnlyHint` |
+| `openaq_dataframe_describe` | List the tables and columns staged on a DataCanvas so you can write valid SQL for `openaq_dataframe_query` without guessing column names. | `canvas_id` | `readOnlyHint` |
+| `openaq_dataframe_drop` | Delete a whole staged canvas and its tables. Returns `canvasId` and `dropped`; unknown, expired, foreign-tenant, and already-deleted ids return false. Opt-in with `OPENAQ_ENABLE_CANVAS_DROP=true`. | `canvas_id` | `destructiveHint`, `idempotentHint`; `readOnlyHint: false`, `openWorldHint: false` |
 
-Five domain tools + two DataCanvas consumer tools. The canvas pair is mandatory once
-`openaq_get_measurements` can emit a `canvasId` (a token with no query tool is dead output);
-they only activate when `CANVAS_PROVIDER_TYPE=duckdb`.
+Five domain tools + three DataCanvas consumer tools; seven tools are enabled by default.
+Query and describe are always registered and require `CANVAS_PROVIDER_TYPE=duckdb` to operate.
+Drop is registered only with `OPENAQ_ENABLE_CANVAS_DROP=true` and also requires DuckDB to operate.
 
 ### Resources
 
@@ -133,7 +134,7 @@ Design consequences, enforced throughout:
 - Validate lat/lon and radius bounds **in Zod at the edge** — the API returns a plain-text HTTP 500
   for out-of-range coordinates (e.g. `999,999`) instead of a clean 4xx; bounding the input prevents
   a confusing upstream crash.
-- Large measurement ranges (> ~500 rows) spill to DataCanvas for SQL analysis when
+- Large measurement ranges (> 100 rows) spill to DataCanvas for SQL analysis when
   `CANVAS_PROVIDER_TYPE=duckdb`; without it, return a truncated preview + `totalCount`.
 - Disclose truncation on capped-list tools via the framework enrichers (fields optional in schema).
 - Identity: display/title is the hyphenated machine name **`openaq-mcp-server`** on every surface
@@ -183,12 +184,15 @@ the parse-failure rule is the backstop if a 500 slips through anyway.
 | `OPENAQ_API_KEY` | **Yes** | — | OpenAQ v3 API key, sent as the `X-API-Key` header. Free from openaq.org. Missing → `ConfigurationError` at startup. |
 | `OPENAQ_API_BASE_URL` | No | `https://api.openaq.org/v3` | Base URL override (testing / proxy). |
 | `CANVAS_PROVIDER_TYPE` | No | `none` | Set to `duckdb` to enable DataCanvas spillover for large measurement series. Without it, `openaq_get_measurements` returns a truncated preview and the dataframe tools are inert. |
+| `OPENAQ_ENABLE_CANVAS_DROP` | No | `false` | Register `openaq_dataframe_drop`. Deletion requires DuckDB; callers sharing a canvas id in the same tenant share deletion access. |
 | `MCP_TRANSPORT_TYPE` | No | `stdio` | `stdio` or `http`. Framework-managed. |
-| `PORT` | No | `3000` | HTTP port when transport is `http`. Framework-managed. |
+| `MCP_HTTP_PORT` | No | `3010` | HTTP port when transport is `http`. Framework-managed. |
+| `MCP_SESSION_MODE` | No | `stateless` | Overrides the explicit `createApp()` posture. No handler uses `ctx.requestInput`. |
 
 `server-config.ts` (lazy-parsed `parseEnvConfig`): `apiKey` ← `OPENAQ_API_KEY` (required),
-`baseUrl` ← `OPENAQ_API_BASE_URL`. Both `server.json` (`environmentVariables[]`) and `manifest.json`
-(`mcp_config.env` + `user_config`) must list `OPENAQ_API_KEY` (lint:packaging checks the names match).
+`baseUrl` ← `OPENAQ_API_BASE_URL`, `enableCanvasDrop` ← `OPENAQ_ENABLE_CANVAS_DROP` (`z.stringbool()`,
+default false). `server.json`, `manifest.json`, and both plugin manifests expose the canvas provider
+and deletion flag alongside the API key; the MCPB bundle omits DuckDB's native binding.
 
 ---
 
@@ -750,6 +754,21 @@ reaches the 10,000-row DuckDB ceiling and lands ~1.8 MB in one response.
 
 ---
 
+### `openaq_dataframe_drop`
+
+`canvas_id` selects the whole canvas, never a table. Tenant-scoped `DataCanvas.drop` returns
+`{ canvasId, dropped }`: true when deleted, false for an unknown, expired, already-deleted, or
+foreign-tenant canvas. Both response surfaces disclose the outcome. The tool is destructive and
+idempotent; OpenAQ's source data is unaffected.
+
+`OPENAQ_ENABLE_CANVAS_DROP=true` registers the tool. Otherwise `disabledTool()` keeps it out of
+`tools/list`, refuses calls, and exposes the enable hint on the HTTP landing page. Registration
+does not enable DuckDB: with `CANVAS_PROVIDER_TYPE=none`, calls fail as `canvas_unavailable` with
+a provider enable hint. With authentication off, all callers share the default tenant, so anyone
+holding a canvas id can delete its staged tables when deletion is enabled.
+
+---
+
 ## DataCanvas plan
 
 **Decision: canvas spillover on `openaq_get_measurements` only.** Recorded in the Decisions Log.
@@ -774,6 +793,10 @@ reaches the 10,000-row DuckDB ceiling and lands ~1.8 MB in one response.
   *different* sensor adds a table, so the agent can `JOIN`/`UNION` to compare stations; reusing it
   for the *same* sensor at another aggregation or window overwrites the earlier series. The drop
   reports whether it removed anything, and the staging notice says so when it did.
+- **Stable staged types.** `registerTable` receives an explicit schema: nullable `DOUBLE` for
+  `value`, `min`, `median`, `max`, `avg`, `sd`, and `percentComplete`; non-null `VARCHAR` for
+  `datetimeFrom`/`datetimeTo`; non-null `BOOLEAN` for `flagged`. Leading zeros or nulls cannot
+  make later fractional readings truncate to integers. The inline response schema is unchanged.
 - **Mandatory pairing, surfaced at runtime:** because `get_measurements` can emit a `canvasId`, the
   server ships `openaq_dataframe_query` (+ `openaq_dataframe_describe`). A token with no query tool
   is dead output — and a token whose response names no tool is nearly as dead, so the staging path
@@ -782,10 +805,11 @@ reaches the 10,000-row DuckDB ceiling and lands ~1.8 MB in one response.
   table is flat (`min`, `sd`) while the response `series` is nested (`summary.min`), so SQL written
   from the response shape alone references columns that do not exist.
 - **Graceful degradation:** without `CANVAS_PROVIDER_TYPE=duckdb`, `get_measurements` returns the
-  truncated preview + `totalCount` and omits the canvas fields (the `canvas_unavailable` contract
-  documents this); the dataframe tools throw `canvas_unavailable` with an enable hint.
-- **No-auth canvas is fine:** OpenAQ is public, non-PII data — exactly the public-data analytics
-  profile the canvas token model is designed for.
+  truncated preview + `totalCount` and omits the canvas fields, with a notice explaining why;
+  the registered dataframe tools throw `canvas_unavailable` with an enable hint.
+- **Deletion is opt-in.** Public OpenAQ data can be shared through unauthenticated canvases, but
+  a shared handle also grants deletion access within that tenant. The default-off drop flag leaves
+  that choice to the deployment owner.
 
 ## Enrichment plan
 
@@ -829,6 +853,7 @@ projected onto both surfaces. The `capped-list-no-truncation` linter enforces di
 | `openaq_list_parameters` | `GET /v3/parameters` | Whole catalog in one call; filtered locally |
 | `openaq_list_countries` | `GET /v3/countries` | Whole catalog in one `limit=1000` call; filtered and paged locally |
 | `openaq_dataframe_query` / `_describe` | none (DataCanvas) | Query/describe staged `measurements_<sensorId>` tables |
+| `openaq_dataframe_drop` | none (DataCanvas) | Delete a complete canvas within the caller's tenant; opt-in |
 
 ---
 
@@ -853,7 +878,7 @@ or pages past step 1's first page.
 |:--|:-----|:--------|
 | 1 | `GET /v3/locations/{locationId}` | Find the sensor whose `parameter.id === parametersId` |
 | 2…N | `GET /v3/sensors/{sensorId}/measurements[/hourly\|/daily]?datetime_from=…&datetime_to=…&page=…` | Pull the series, paging until the 5000-row ceiling or the range is exhausted |
-| spill | `spillover()` → register `measurements_<sensorId>` on the canvas | Stage the full set when it exceeds the inline preview |
+| spill | Acquire canvas, drop the prior sensor table, and `registerTable` with an explicit schema | Stage the pulled rows when they exceed the inline preview or `canvas_id` is supplied |
 
 Surfaces the design question: cap internal paging so an unbounded `raw` range over years doesn't
 loop forever — page up to a row ceiling (5000), then rely on the canvas + `totalCount` to
@@ -1025,6 +1050,8 @@ live (not hardcoded) so new parameters appear automatically; this table document
 
 | Date | Decision | Rationale |
 |:-----|:---------|:----------|
+| 2026-09-26 | **Canvas deletion is default-off**, enabled by `OPENAQ_ENABLE_CANVAS_DROP=true`. | Unauthenticated callers share a tenant, so a shared canvas id grants deletion access; the deployment owner must opt in. |
+| 2026-09-26 | **Stage all seven numeric measurement columns as nullable `DOUBLE`.** | Leading zero or null samples cannot determine the type of later fractional values; an explicit schema preserves precision and gaps. |
 | 2026-06-13 | **Five domain tools** (`find_locations`, `get_readings`, `get_measurements`, `list_parameters`, `list_countries`) + two DataCanvas consumer tools, matching the idea sketch exactly. | Maps cleanly to the five user goals (find stations, latest, history, units, coverage). No tool earns a cut; none missing. The canvas pair is required infrastructure, not a sixth domain tool. |
 | 2026-06-13 | **`parametersId` (numeric id) is the parameter selector across all tools**, not a bare pollutant name. | Live catalog proves the same pollutant has multiple ids for different units (CO: 4/8/102). A name is ambiguous about units; the id is exact. `list_parameters` maps name+unit → id. |
 | 2026-06-13 | **`get_measurements` resolves the sensor internally** via `/locations/{id}` → match `parameter.id` → `/sensors/{sensorId}/measurements`. Agent passes location + parameter, never a sensor id. | v3 made measurements sensor-scoped; exposing sensor ids would force the agent to walk the hierarchy. Hiding it is the server's core UX job. |

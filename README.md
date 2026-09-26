@@ -1,13 +1,13 @@
 <div align="center">
   <h1>@cyanheads/openaq-mcp-server</h1>
   <p><b>Find air-quality monitoring stations, read latest sensor values, and pull historical pollutant series via MCP. STDIO or Streamable HTTP.</b>
-  <div>7 Tools • 2 Resources</div>
+  <div>8 Tools (7 enabled by default) • 2 Resources</div>
   </p>
 </div>
 
 <div align="center">
 
-[![npm](https://img.shields.io/npm/v/@cyanheads/openaq-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openaq-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openaq-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![npm](https://img.shields.io/npm/v/@cyanheads/openaq-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/openaq-mcp-server) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/openaq-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.1.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -42,6 +42,7 @@ Measured air quality from the OpenAQ v3 API: physical-sensor observations from g
 | `openaq_list_countries` | Country coverage: data span and the parameters measured in each |
 | `openaq_dataframe_describe` | List the tables and columns staged on a DataCanvas |
 | `openaq_dataframe_query` | Run a read-only SQL `SELECT` over staged measurement series |
+| `openaq_dataframe_drop` | Delete a complete staged canvas; opt-in with `OPENAQ_ENABLE_CANVAS_DROP=true` |
 
 ### Resources
 
@@ -72,9 +73,8 @@ Both resources mirror tool output, so tool-only clients lose nothing.
 
 ### `openaq_get_measurements` <sub>tool</sub>
 
-- `locationId` and `parametersId` required; `datetimeFrom`/`datetimeTo` take a UTC timestamp, sent as is, or a `YYYY-MM-DD` date, read as the station's local calendar day (a UTC day when OpenAQ lists no timezone); `aggregation` is `raw` (default), `hourly`, or `daily`, and rollups add min/median/max/avg/sd per bucket. Pulls up to 5,000 rows per call
-- Returns `series` with `sensorId`, `pulledCount`, and `pullComplete`, and a `location` carrying `provider`, `providerId`, and `timezone`; `totalCount` is a floor when `totalCountIsLowerBound` is set
-- `effectiveRange` echoes the UTC bounds sent upstream. Hourly and daily responses add `gapCount` and the first 20 missing intervals as `gaps`, and the notice flags an edge bucket the range clips
+- Requires `locationId` and `parametersId`; `datetimeFrom`/`datetimeTo` accept UTC timestamps or station-local `YYYY-MM-DD` dates (UTC days when the station has no timezone). `aggregation` is `raw` (default), `hourly`, or `daily`; up to 5,000 rows per call
+- Returns `series`, `sensorId`, `pulledCount`, `pullComplete`, `effectiveRange`, and station `provider`, `providerId`, and `timezone`. `totalCount` is a floor when `totalCountIsLowerBound` is set; rollups add summary statistics, `gapCount`, the first 20 missing intervals as `gaps`, and a notice when edge buckets are clipped
 - Past 100 rows, `series` is a preview (`truncated`) and the pulled rows stage on a DataCanvas as `measurements_<sensorId>` (`canvasId`, `tableName`) when `CANVAS_PROVIDER_TYPE=duckdb`; a supplied `canvas_id` stages onto that canvas at any size. One table per sensor: a second sensor adds a table to join against, and re-staging the same sensor overwrites its earlier series
 
 ---
@@ -105,6 +105,14 @@ Both resources mirror tool output, so tool-only clients lose nothing.
 - A `canvas_id` and one read-only `SELECT`; writes, DDL, and file/network table functions are rejected
 - At most 200 rows per response, with `truncated` set when the cap cut the result; page with `ORDER BY` plus `LIMIT`/`OFFSET`
 - Fails as `canvas_unavailable`, `canvas_not_found`, or `missing_table`
+
+---
+
+### `openaq_dataframe_drop` <sub>tool</sub>
+
+- Registered only with `OPENAQ_ENABLE_CANVAS_DROP=true`; calls fail as `canvas_unavailable` unless `CANVAS_PROVIDER_TYPE=duckdb`. When disabled, the HTTP landing page shows the enable hint and `tools/list` omits the tool
+- Takes a `canvas_id` and deletes that whole canvas, including all staged tables. Other agents sharing the id lose access; OpenAQ's source data is unaffected
+- Returns the requested `canvasId` and `dropped`: true when deleted, false when no reachable canvas exists. With authentication off, callers share a tenant: anyone holding an id can delete its canvas when enabled
 
 ---
 
@@ -259,12 +267,17 @@ cp .env.example .env
 | `OPENAQ_API_KEY` | **Required.** OpenAQ v3 API key, sent as the `X-API-Key` header. | — |
 | `OPENAQ_API_BASE_URL` | OpenAQ v3 API base URL, for a proxy or test mirror. | `https://api.openaq.org/v3` |
 | `CANVAS_PROVIDER_TYPE` | `duckdb` stages large measurement series for SQL via the dataframe tools; without it, large series return a preview plus a notice. The `.mcpb` bundle ships without DuckDB, so use npm, npx, or Docker for canvas work. | `none` |
+| `OPENAQ_ENABLE_CANVAS_DROP` | Enable `openaq_dataframe_drop` to delete entire canvases and release their resources. Requires DuckDB; an id shared with another agent grants deletion access within the same tenant. | `false` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | HTTP server port. | `3010` |
-| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. | `stateless` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. Overrides the server's explicit stateless posture; `auto` resolves to stateful. | `stateless` |
 | `MCP_AUTH_MODE` | Authentication: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (`debug`, `info`, `warning`, `error`, etc.). | `info` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP base URL; traces use `/v1/traces` and metrics use `/v1/metrics`. Signal-specific endpoints override it. | — |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Opt into OTLP log export with a full endpoint URL. The base endpoint never enables logs. | — |
+| `LOG_TOOL_FAILURE_PAYLOADS` | Log failed calls' arguments and results. Redacts by key name only; secrets in free-form values remain. | `false` |
+| `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` | UTF-8 byte cap per logged failure payload. | `16384` |
 
 See [`.env.example`](./.env.example) for the full list of optional overrides.
 
