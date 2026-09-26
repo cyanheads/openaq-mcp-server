@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-09-26
+
+Run guarded Docker dependency installs natively for amd64 and arm64.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-09-26 · ⚠️ Breaking
 
 Opt-in canvas deletion and precise measurement tables, with mcp-ts-core 0.13.9.
