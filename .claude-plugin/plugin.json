@@ -13,6 +13,20 @@
   "license": "Apache-2.0",
   "keywords": ["mcp", "mcp-server", "model-context-protocol", "openaq", "air-quality"],
   "userConfig": {
+    "CANVAS_PROVIDER_TYPE": {
+      "type": "string",
+      "title": "DataCanvas provider",
+      "description": "Set to duckdb to stage and query large measurement series.",
+      "required": false,
+      "default": "none"
+    },
+    "OPENAQ_ENABLE_CANVAS_DROP": {
+      "type": "boolean",
+      "title": "Enable canvas deletion",
+      "description": "Allow deletion of complete staged canvases. Requires the duckdb provider; callers sharing a canvas id in the same tenant can delete it.",
+      "required": false,
+      "default": false
+    },
     "OPENAQ_API_KEY": {
       "type": "string",
       "title": "OpenAQ API key",
@@ -27,7 +41,9 @@
       "args": ["-y", "@cyanheads/openaq-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio",
-        "OPENAQ_API_KEY": "${user_config.OPENAQ_API_KEY}"
+        "OPENAQ_API_KEY": "${user_config.OPENAQ_API_KEY}",
+        "CANVAS_PROVIDER_TYPE": "${user_config.CANVAS_PROVIDER_TYPE}",
+        "OPENAQ_ENABLE_CANVAS_DROP": "${user_config.OPENAQ_ENABLE_CANVAS_DROP}"
       }
     }
   }

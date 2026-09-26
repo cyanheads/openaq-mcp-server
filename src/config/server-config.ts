@@ -1,7 +1,7 @@
 /**
  * @fileoverview Server-specific environment configuration for openaq-mcp-server.
  * Lazy-parsed and kept separate from the framework's core config. Maps the
- * OpenAQ v3 API key and optional base-URL override to a validated Zod schema.
+ * OpenAQ v3 credentials, base-URL override, and canvas deletion opt-in to a Zod schema.
  * @module config/server-config
  */
 
@@ -20,6 +20,10 @@ const ServerConfigSchema = z.object({
     .url()
     .default('https://api.openaq.org/v3')
     .describe('OpenAQ v3 API base URL. Override for a proxy or test mirror.'),
+  enableCanvasDrop: z
+    .stringbool()
+    .default(false)
+    .describe('Enable deletion of staged canvases through openaq_dataframe_drop.'),
 });
 
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
@@ -31,6 +35,7 @@ export function getServerConfig(): ServerConfig {
   _config ??= parseEnvConfig(ServerConfigSchema, {
     apiKey: 'OPENAQ_API_KEY',
     baseUrl: 'OPENAQ_API_BASE_URL',
+    enableCanvasDrop: 'OPENAQ_ENABLE_CANVAS_DROP',
   });
   return _config;
 }

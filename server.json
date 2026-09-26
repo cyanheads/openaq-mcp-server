@@ -53,6 +53,13 @@
           "default": "none"
         },
         {
+          "name": "OPENAQ_ENABLE_CANVAS_DROP",
+          "description": "Enable deletion of complete staged canvases; requires CANVAS_PROVIDER_TYPE=duckdb.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
+        },
+        {
           "name": "MCP_LOG_LEVEL",
           "description": "Sets the minimum log level for output (e.g., 'debug', 'info', 'warn').",
           "format": "string",
@@ -101,6 +108,13 @@
           "format": "string",
           "isRequired": false,
           "default": "none"
+        },
+        {
+          "name": "OPENAQ_ENABLE_CANVAS_DROP",
+          "description": "Enable deletion of complete staged canvases; requires CANVAS_PROVIDER_TYPE=duckdb.",
+          "format": "boolean",
+          "isRequired": false,
+          "default": "false"
         },
         {
           "name": "MCP_HTTP_HOST",

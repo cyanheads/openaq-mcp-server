@@ -22,7 +22,8 @@
         "MCP_AUTH_MODE": "none",
         "NODE_ENV": "production",
         "OPENAQ_API_KEY": "${user_config.OPENAQ_API_KEY}",
-        "CANVAS_PROVIDER_TYPE": "${user_config.CANVAS_PROVIDER_TYPE}"
+        "CANVAS_PROVIDER_TYPE": "${user_config.CANVAS_PROVIDER_TYPE}",
+        "OPENAQ_ENABLE_CANVAS_DROP": "${user_config.OPENAQ_ENABLE_CANVAS_DROP}"
       }
     }
   },
@@ -38,6 +39,13 @@
       "description": "OpenAQ v3 API key, sent as the X-API-Key header. Free from openaq.org.",
       "sensitive": true,
       "required": true
+    },
+    "OPENAQ_ENABLE_CANVAS_DROP": {
+      "type": "boolean",
+      "title": "Enable canvas deletion",
+      "description": "Allow deletion of complete staged canvases. Requires DuckDB, available through npm or Docker; this bundle omits its native binding.",
+      "required": false,
+      "default": false
     },
     "CANVAS_PROVIDER_TYPE": {
       "type": "string",

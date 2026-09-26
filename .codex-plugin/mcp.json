@@ -5,6 +5,6 @@
     "env": {
       "MCP_TRANSPORT_TYPE": "stdio"
     },
-    "env_vars": ["OPENAQ_API_KEY"]
+    "env_vars": ["OPENAQ_API_KEY", "CANVAS_PROVIDER_TYPE", "OPENAQ_ENABLE_CANVAS_DROP"]
   }
 }

@@ -6,10 +6,12 @@
  * @module index
  */
 
-import { createApp } from '@cyanheads/mcp-ts-core';
+import { createApp, disabledTool } from '@cyanheads/mcp-ts-core';
+import { getServerConfig } from './config/server-config.js';
 import { locationResource } from './mcp-server/resources/definitions/location.resource.js';
 import { parametersResource } from './mcp-server/resources/definitions/parameters.resource.js';
 import { dataframeDescribe } from './mcp-server/tools/definitions/dataframe-describe.tool.js';
+import { dataframeDrop } from './mcp-server/tools/definitions/dataframe-drop.tool.js';
 import { dataframeQuery } from './mcp-server/tools/definitions/dataframe-query.tool.js';
 import { findLocations } from './mcp-server/tools/definitions/find-locations.tool.js';
 import { getMeasurements } from './mcp-server/tools/definitions/get-measurements.tool.js';
@@ -31,6 +33,12 @@ await createApp({
     listCountries,
     dataframeQuery,
     dataframeDescribe,
+    getServerConfig().enableCanvasDrop
+      ? dataframeDrop
+      : disabledTool(dataframeDrop, {
+          reason: 'Canvas deletion is disabled in this deployment.',
+          hint: 'OPENAQ_ENABLE_CANVAS_DROP=true',
+        }),
   ],
   resources: [locationResource, parametersResource],
   instructions:
