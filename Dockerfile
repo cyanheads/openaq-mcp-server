@@ -4,10 +4,7 @@
 # This stage installs all dependencies (including dev), builds the TypeScript
 # source code into JavaScript, and prepares the production assets.
 # ==============================================================================
-# Pinned to the *build* platform: this stage only runs tsc + tsc-alias, whose
-# output is plain architecture-independent JavaScript, so emulating it for a
-# foreign target buys nothing. Bun 1.4.0 also aborts under qemu, which makes a
-# cross-arch build of this stage fail outright rather than merely run slowly.
+# Compilation produces architecture-independent JavaScript; run Bun natively.
 FROM --platform=$BUILDPLATFORM oven/bun:1.4.2 AS build
 
 WORKDIR /usr/src/app
@@ -28,13 +25,12 @@ RUN bun run build
 
 
 # ==============================================================================
-# Production Stage
+# Production Dependencies
 #
-# This stage creates a minimal, optimized, and secure image for running the
-# application. It uses a slim base image and only includes production
-# dependencies and build artifacts.
+# Run Bun and its security scanner natively, selecting optional dependencies
+# for the target CPU. The scanner aborts under amd64 QEMU emulation (#47).
 # ==============================================================================
-FROM oven/bun:1.4.2-slim AS production
+FROM --platform=$BUILDPLATFORM oven/bun:1.4.2-slim AS production-deps
 
 WORKDIR /usr/src/app
 
@@ -42,30 +38,25 @@ WORKDIR /usr/src/app
 # production dependencies are installed.
 ENV NODE_ENV=production
 
-# OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
-ARG APP_VERSION
-LABEL org.opencontainers.image.title="openaq-mcp-server"
-LABEL org.opencontainers.image.description="Measured air quality via the OpenAQ v3 API — physical-sensor observations from government monitors worldwide, with location/readings/measurements tools and DataCanvas SQL over historical series."
-LABEL org.opencontainers.image.licenses="Apache-2.0"
-LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source="https://github.com/cyanheads/openaq-mcp-server"
-
 # Copy dependency manifests and preserve the install supply-chain guards.
 COPY package.json bun.lock bunfig.toml ./
 
 # Seed the configured dev-only scanner before the production-filtered install.
 COPY --from=build /usr/src/app/node_modules/@socketsecurity/bun-security-scanner ./node_modules/@socketsecurity/bun-security-scanner
 
-# Install only production dependencies, ignoring any lifecycle scripts (like 'prepare')
-# that are not needed in the final production image.
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    bun install --production --omit=peer --frozen-lockfile --ignore-scripts
-
 # Conditionally install OpenTelemetry optional peer dependencies (Tier 3).
 # Installed by default; omit with --build-arg OTEL_ENABLED=false.
 # Resolve each package inside the installed framework's tested peer range.
+ARG TARGETARCH
 ARG OTEL_ENABLED=true
 RUN --mount=type=cache,target=/root/.bun/install/cache \
+    case "$TARGETARCH" in \
+      amd64) cpu=x64 ;; \
+      arm64) cpu=arm64 ;; \
+      *) echo "Unsupported target architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && bun install --cpu="$cpu" --production --omit=peer --frozen-lockfile --ignore-scripts \
+    && \
     if [ "$OTEL_ENABLED" = "true" ]; then \
       specs=$(bun -e ' \
         const { peerDependencies: peers } = await Bun.file("node_modules/@cyanheads/mcp-ts-core/package.json").json(); \
@@ -87,17 +78,36 @@ RUN --mount=type=cache,target=/root/.bun/install/cache \
         @opentelemetry/sdk-node \
         @opentelemetry/sdk-trace-node \
         @opentelemetry/semantic-conventions) \
-      && bun add --omit=dev --omit=peer --ignore-scripts $specs; \
+      && bun add --cpu="$cpu" --omit=dev --omit=peer --ignore-scripts $specs; \
     fi
+
+# Prepare the writable directory natively; the runtime stage executes no build commands.
+RUN mkdir -p /var/log/openaq-mcp-server
+
+# ==============================================================================
+# Production Stage
+# ==============================================================================
+FROM oven/bun:1.4.2-slim AS production
+
+WORKDIR /usr/src/app
+ENV NODE_ENV=production
+
+# OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
+ARG APP_VERSION
+LABEL org.opencontainers.image.title="openaq-mcp-server"
+LABEL org.opencontainers.image.description="Measured air quality via the OpenAQ v3 API — physical-sensor observations from government monitors worldwide, with location/readings/measurements tools and DataCanvas SQL over historical series."
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+LABEL org.opencontainers.image.version="${APP_VERSION}"
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/openaq-mcp-server"
+
+COPY --from=production-deps /usr/src/app/package.json /usr/src/app/bun.lock /usr/src/app/bunfig.toml ./
+COPY --from=production-deps /usr/src/app/node_modules ./node_modules
 
 # Copy the compiled application code from the build stage
 COPY --from=build /usr/src/app/dist ./dist
 
-# The 'oven/bun' image already provides a non-root user named 'bun'.
-# We will use this existing user for enhanced security.
-
-# Create and set permissions for the log directory, assigning ownership to the 'bun' user.
-RUN mkdir -p /var/log/openaq-mcp-server && chown -R bun:bun /var/log/openaq-mcp-server
+# The base image provides the non-root user; COPY sets ownership without emulation.
+COPY --from=production-deps --chown=bun:bun /var/log/openaq-mcp-server /var/log/openaq-mcp-server
 
 # Switch to the non-root user
 USER bun
