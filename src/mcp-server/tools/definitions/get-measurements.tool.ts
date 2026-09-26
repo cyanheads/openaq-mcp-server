@@ -17,7 +17,7 @@
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { CanvasIdSchema } from '@cyanheads/mcp-ts-core/canvas';
+import { CanvasIdSchema, type ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { displayNumber } from '@/mcp-server/tools/shared/format-helpers.js';
 import { isNotFound } from '@/mcp-server/tools/shared/schema-helpers.js';
@@ -199,6 +199,20 @@ interface SeriesRow {
   value: number | null;
   [key: string]: string | number | boolean | null;
 }
+
+/** Sampling leading zeros or gaps cannot determine the numeric type of later readings. */
+const SERIES_COLUMNS = [
+  { name: 'datetimeFrom', type: 'VARCHAR', nullable: false },
+  { name: 'datetimeTo', type: 'VARCHAR', nullable: false },
+  { name: 'value', type: 'DOUBLE', nullable: true },
+  { name: 'min', type: 'DOUBLE', nullable: true },
+  { name: 'median', type: 'DOUBLE', nullable: true },
+  { name: 'max', type: 'DOUBLE', nullable: true },
+  { name: 'avg', type: 'DOUBLE', nullable: true },
+  { name: 'sd', type: 'DOUBLE', nullable: true },
+  { name: 'percentComplete', type: 'DOUBLE', nullable: true },
+  { name: 'flagged', type: 'BOOLEAN', nullable: false },
+] satisfies ColumnSchema[];
 
 function toSeriesRow(m: OpenAqMeasurement): SeriesRow {
   const s = m.summary;
@@ -827,7 +841,10 @@ export const getMeasurements = tool('openaq_get_measurements', {
           // Idempotent re-stage when reusing a canvas. `drop` reports whether a
           // table was actually removed — that is the replacement to disclose.
           const replaced = await instance.drop(tableName);
-          const handle = await instance.registerTable(tableName, rows, { signal: ctx.signal });
+          const handle = await instance.registerTable(tableName, rows, {
+            schema: SERIES_COLUMNS,
+            signal: ctx.signal,
+          });
           spill = { canvasId: instance.canvasId, tableName: handle.tableName };
           // The response that mints the handle is where an agent learns the
           // handle exists. describe() comes first because the staged table is
