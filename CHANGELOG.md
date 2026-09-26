@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-09-26 · ⚠️ Breaking
+
+Opt-in canvas deletion and precise measurement tables, with mcp-ts-core 0.13.9.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-09-24 · ⚠️ Breaking
 
 openaq_get_measurements reads a date-only bound as the station's local calendar day and reports the bounds sent, clipped edge buckets, and missing intervals; openaq_get_readings picks the nearest station from up to 1,000 candidates; missing coordinates, country, and provider stay null.
