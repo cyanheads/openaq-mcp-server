@@ -756,8 +756,8 @@ reaches the 10,000-row DuckDB ceiling and lands ~1.8 MB in one response.
 
 ### `openaq_dataframe_drop`
 
-`canvas_id` selects the whole canvas, never a table. Tenant-scoped `DataCanvas.drop` returns
-`{ canvasId, dropped }`: true when deleted, false for an unknown, expired, already-deleted, or
+`canvas_id` selects the whole canvas, never a table. The tool wraps tenant-scoped `DataCanvas.drop`
+in `{ canvasId, dropped }`: true when deleted, false for an unknown, expired, already-deleted, or
 foreign-tenant canvas. Both response surfaces disclose the outcome. The tool is destructive and
 idempotent; OpenAQ's source data is unaffected.
 
@@ -814,7 +814,7 @@ holding a canvas id can delete its staged tables when deletion is enabled.
 ## Enrichment plan
 
 Per the framework's capped-list rules, **truncation fields are OPTIONAL in the output schema** (the
-framework only populates them when the cap is hit; declaring them required throws -32007 on every
+framework only populates them when the cap is hit; declaring them required returns -32603 on every
 non-truncated result):
 
 | Tool | Required enrichment | Optional enrichment (cap-hit only) |
